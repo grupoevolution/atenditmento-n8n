@@ -69,7 +69,11 @@ function addDeliveryReport(type, status, data) {
         timestamp: new Date().toISOString(),
         type: type,
         status: status, // 'success' ou 'failed'
-        data: data
+        data: {
+            ...data,
+            client_name: data.client_name || data.first_name || extractClientName(data),
+            client_number: data.client_number || data.phone || 'N/A'
+        }
     };
     
     deliveryReports.push(report);
@@ -79,6 +83,13 @@ function addDeliveryReport(type, status, data) {
     deliveryReports = deliveryReports.filter(report => 
         new Date(report.timestamp).getTime() > twentyFourHoursAgo
     );
+}
+
+// Função para extrair nome do cliente dos dados
+function extractClientName(data) {
+    if (data.order_code) return data.order_code;
+    if (data.client_number) return data.client_number.substring(-4);
+    return 'Cliente';
 }
 
 // Função para verificar status da instância
@@ -201,13 +212,20 @@ app.post('/webhook/perfect', async (req, res) => {
                 addLog('info', `🗑️ PIX pendente removido: ${orderCode}`);
             }
             
+            // Busca instância do cliente (mantém a mesma se já existir)
+            let instance;
+            if (clientInstanceMap.has(phoneNumber)) {
+                instance = clientInstanceMap.get(phoneNumber);
+                addLog('info', `✅ Mantendo cliente ${phoneNumber} na instância ${instance}`);
+            } else {
+                instance = await getAvailableInstance(phoneNumber);
+            }
+            
             // Atualiza estado da conversa
             if (conversationState.has(phoneNumber)) {
                 conversationState.get(phoneNumber).original_event = 'aprovada';
+                conversationState.get(phoneNumber).instance = instance;
             }
-            
-            // Busca instância do cliente
-            const instance = await getAvailableInstance(phoneNumber);
             
             // Envia para N8N
             const eventData = {
@@ -234,6 +252,8 @@ app.post('/webhook/perfect', async (req, res) => {
                 order_code: orderCode,
                 product: product,
                 instance: instance,
+                client_name: firstName,
+                client_number: phoneNumber,
                 error: sendResult.error
             });
             
@@ -290,6 +310,8 @@ app.post('/webhook/perfect', async (req, res) => {
                     order_code: orderCode,
                     product: product,
                     instance: instance,
+                    client_name: firstName,
+                    client_number: phoneNumber,
                     error: sendResult.error
                 });
             }, PIX_TIMEOUT);
@@ -331,6 +353,8 @@ app.post('/webhook/perfect', async (req, res) => {
                 order_code: orderCode,
                 product: product,
                 instance: instance,
+                client_name: firstName,
+                client_number: phoneNumber,
                 error: sendResult.error
             });
         }
@@ -394,15 +418,16 @@ app.post('/webhook/evolution', async (req, res) => {
             
         } else {
             // RESPOSTA DO CLIENTE
-            if (clientState.waiting_for_response) {
-                clientState.response_count++;
+            if (clientState.waiting_for_response && clientState.response_count === 0) {
+                // APENAS A PRIMEIRA RESPOSTA
+                clientState.response_count = 1;
                 clientState.waiting_for_response = false;
                 
-                addLog('info', `📥 RESPOSTA ${clientState.response_count} do cliente ${clientNumber}: "${messageContent.substring(0, 50)}..."`);
+                addLog('info', `📥 PRIMEIRA RESPOSTA do cliente ${clientNumber}: "${messageContent.substring(0, 50)}..."`);
                 
                 // Envia evento de resposta para N8N
                 const eventData = {
-                    event_type: `resposta_${clientState.response_count.toString().padStart(2, '0')}`,
+                    event_type: 'resposta_01',
                     produto: clientState.product,
                     instancia: clientState.instance,
                     evento_origem: clientState.original_event,
@@ -410,7 +435,7 @@ app.post('/webhook/evolution', async (req, res) => {
                         telefone: clientNumber
                     },
                     resposta: {
-                        numero: clientState.response_count,
+                        numero: 1,
                         conteudo: messageContent,
                         timestamp: new Date().toISOString()
                     },
@@ -421,20 +446,23 @@ app.post('/webhook/evolution', async (req, res) => {
                     dados_originais: data
                 };
                 
-                const sendResult = await sendToN8N(eventData, `resposta_${clientState.response_count}`);
-                addDeliveryReport(`resposta_${clientState.response_count}`, sendResult.success ? 'success' : 'failed', {
+                const sendResult = await sendToN8N(eventData, 'resposta_01');
+                addDeliveryReport('resposta_01', sendResult.success ? 'success' : 'failed', {
                     client_number: clientNumber,
                     product: clientState.product,
                     instance: clientState.instance,
-                    response_number: clientState.response_count,
+                    order_code: clientState.order_code,
+                    client_name: clientNumber.substring(-4),
                     error: sendResult.error
                 });
                 
-                // Atualiza estado
+                // Atualiza estado - marca como já respondido
                 conversationState.set(clientNumber, clientState);
                 
+            } else if (clientState.response_count > 0) {
+                addLog('info', `📝 Resposta adicional ignorada do cliente ${clientNumber} (já enviou resposta_01)`);
             } else {
-                addLog('info', `📝 Mensagem adicional do cliente ${clientNumber} (não conta como nova resposta)`);
+                addLog('info', `📝 Mensagem do cliente ${clientNumber} antes do sistema enviar mensagem`);
             }
         }
         
@@ -591,7 +619,7 @@ app.get('/', (req, res) => {
                     padding: 20px;
                 }
                 .container { 
-                    max-width: 1400px; 
+                    max-width: 1600px; 
                     margin: 0 auto; 
                     background: rgba(255, 255, 255, 0.95);
                     backdrop-filter: blur(10px);
@@ -684,74 +712,184 @@ app.get('/', (req, res) => {
                     transform: translateY(-2px);
                     box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
                 }
-                .data-grid {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 30px;
-                    margin-top: 30px;
-                }
-                .data-section {
+                .events-table {
                     background: white;
                     border-radius: 15px;
-                    padding: 25px;
+                    overflow: hidden;
                     border: 1px solid #e2e8f0;
-                    max-height: 400px;
-                    overflow-y: auto;
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
                 }
-                .data-item {
-                    padding: 15px;
-                    border-bottom: 1px solid #f7fafc;
+                .table-header {
+                    background: linear-gradient(135deg, #4a5568, #2d3748);
+                    color: white;
+                    padding: 20px;
+                    display: grid;
+                    grid-template-columns: 120px 150px 100px 80px 80px 120px 120px 100px;
+                    gap: 15px;
+                    font-weight: 600;
                     font-size: 0.9rem;
-                    line-height: 1.5;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
                 }
-                .data-item:last-child {
+                .table-row {
+                    padding: 18px 20px;
+                    display: grid;
+                    grid-template-columns: 120px 150px 100px 80px 80px 120px 120px 100px;
+                    gap: 15px;
+                    border-bottom: 1px solid #f7fafc;
+                    transition: all 0.2s ease;
+                    align-items: center;
+                    font-size: 0.9rem;
+                }
+                .table-row:hover {
+                    background: #f8fafc;
+                }
+                .table-row:last-child {
                     border-bottom: none;
                 }
-                .data-header {
-                    font-weight: 600;
-                    color: #2d3748;
-                    margin-bottom: 5px;
+                .event-time {
+                    color: #4a5568;
+                    font-weight: 500;
                 }
-                .data-content {
+                .event-client {
+                    color: #2d3748;
+                    font-weight: 600;
+                }
+                .event-phone {
                     color: #718096;
+                    font-size: 0.8rem;
                 }
                 .badge {
-                    display: inline-block;
-                    padding: 4px 12px;
-                    border-radius: 12px;
-                    font-size: 0.8rem;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 6px 12px;
+                    border-radius: 20px;
+                    font-size: 0.75rem;
                     font-weight: 600;
                     text-transform: uppercase;
                     letter-spacing: 0.5px;
-                    margin-left: 10px;
+                    min-width: 70px;
+                    text-align: center;
+                }
+                .badge-pix {
+                    background: #fbd38d;
+                    color: #975a16;
+                }
+                .badge-aprovada {
+                    background: #c6f6d5;
+                    color: #22543d;
+                }
+                .badge-resposta {
+                    background: #bee3f8;
+                    color: #2c5282;
+                }
+                .badge-timeout {
+                    background: #fecaca;
+                    color: #991b1b;
+                }
+                .badge-fab {
+                    background: #e9d5ff;
+                    color: #6b46c1;
+                }
+                .badge-nat {
+                    background: #d1fae5;
+                    color: #065f46;
+                }
+                .badge-cs {
+                    background: #fed7d7;
+                    color: #c53030;
                 }
                 .badge-success {
                     background: #c6f6d5;
                     color: #22543d;
                 }
-                .badge-warning {
-                    background: #fbd38d;
-                    color: #975a16;
-                }
-                .badge-info {
-                    background: #bee3f8;
-                    color: #2c5282;
+                .badge-failed {
+                    background: #fecaca;
+                    color: #991b1b;
                 }
                 .empty-state {
                     text-align: center;
-                    padding: 40px 20px;
+                    padding: 60px 20px;
                     color: #718096;
                 }
-                @media (max-width: 1024px) {
-                    .data-grid {
-                        grid-template-columns: 1fr;
+                .empty-icon {
+                    width: 64px;
+                    height: 64px;
+                    margin: 0 auto 20px;
+                    opacity: 0.5;
+                }
+                .filters {
+                    display: flex;
+                    gap: 15px;
+                    margin-bottom: 20px;
+                    flex-wrap: wrap;
+                    align-items: center;
+                }
+                .filter-select {
+                    padding: 8px 15px;
+                    border: 2px solid #e2e8f0;
+                    border-radius: 20px;
+                    background: white;
+                    font-size: 0.9rem;
+                    cursor: pointer;
+                    transition: all 0.3s ease;
+                }
+                .filter-select:focus {
+                    outline: none;
+                    border-color: #667eea;
+                    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+                }
+                .summary-cards {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                    gap: 15px;
+                    margin-bottom: 20px;
+                }
+                .summary-card {
+                    background: white;
+                    padding: 15px;
+                    border-radius: 10px;
+                    border: 1px solid #e2e8f0;
+                    text-align: center;
+                }
+                .summary-number {
+                    font-size: 1.5rem;
+                    font-weight: 700;
+                    color: #2d3748;
+                }
+                .summary-label {
+                    font-size: 0.8rem;
+                    color: #718096;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                    margin-top: 5px;
+                }
+                @media (max-width: 1200px) {
+                    .table-header, .table-row {
+                        grid-template-columns: 100px 120px 80px 60px 60px 100px 80px 80px;
+                        font-size: 0.8rem;
                     }
                 }
                 @media (max-width: 768px) {
                     body { padding: 10px; }
                     .container { padding: 20px; }
                     h1 { font-size: 2rem; }
-                    .status-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+                    .table-header, .table-row {
+                        grid-template-columns: 1fr;
+                        gap: 10px;
+                    }
+                    .table-header {
+                        display: none;
+                    }
+                    .table-row {
+                        display: block;
+                        padding: 15px;
+                        border-radius: 10px;
+                        margin-bottom: 10px;
+                        background: white;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    }
                 }
             </style>
         </head>
@@ -767,6 +905,222 @@ app.get('/', (req, res) => {
                     <div class="status-card info">
                         <div class="status-label">Conversas Ativas</div>
                         <div class="status-value" id="conversations-count">0</div>
+                    </div>
+                    <div class="status-card warning">
+                        <div class="status-label">Eventos 24h</div>
+                        <div class="status-value" id="events-count">0</div>
+                    </div>
+                    <div class="status-card">
+                        <div class="status-label">Taxa Sucesso</div>
+                        <div class="status-value" id="success-rate">0%</div>
+                    </div>
+                </div>
+                
+                <div class="controls">
+                    <button class="btn" onclick="refreshStatus()">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Atualizar
+                    </button>
+                </div>
+                
+                <div class="section-title">
+                    <svg class="icon" viewBox="0 0 24 24">
+                        <path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                    Relatório de Eventos (24h)
+                </div>
+                
+                <div class="summary-cards" id="summary-cards">
+                    <!-- Preenchido via JavaScript -->
+                </div>
+                
+                <div class="filters">
+                    <select class="filter-select" id="filter-event" onchange="applyFilters()">
+                        <option value="">Todos os Eventos</option>
+                        <option value="pix_gerado">PIX Gerado</option>
+                        <option value="venda_aprovada">Venda Aprovada</option>
+                        <option value="resposta_01">Resposta Cliente</option>
+                        <option value="pix_timeout">PIX Timeout</option>
+                    </select>
+                    
+                    <select class="filter-select" id="filter-product" onchange="applyFilters()">
+                        <option value="">Todos os Produtos</option>
+                        <option value="FAB">FAB</option>
+                        <option value="NAT">NAT</option>
+                        <option value="CS">CS</option>
+                    </select>
+                    
+                    <select class="filter-select" id="filter-status" onchange="applyFilters()">
+                        <option value="">Todos os Status</option>
+                        <option value="success">Sucesso</option>
+                        <option value="failed">Falha</option>
+                    </select>
+                </div>
+                
+                <div class="events-table">
+                    <div class="table-header">
+                        <div>Horário</div>
+                        <div>Cliente</div>
+                        <div>Telefone</div>
+                        <div>Evento</div>
+                        <div>Produto</div>
+                        <div>Instância</div>
+                        <div>Status</div>
+                        <div>Pedido</div>
+                    </div>
+                    <div id="events-list">
+                        <div class="empty-state">
+                            <div class="empty-icon">⏳</div>
+                            Carregando eventos...
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <script>
+                let allEvents = [];
+                let filteredEvents = [];
+                
+                function refreshStatus() {
+                    Promise.all([
+                        fetch('/status').then(r => r.json()),
+                        fetch('/delivery-reports').then(r => r.json())
+                    ])
+                    .then(([statusData, reportsData]) => {
+                        updateStatusCards(statusData);
+                        processEvents(reportsData.reports);
+                        updateSummaryCards();
+                        applyFilters();
+                    })
+                    .catch(err => {
+                        console.error('Erro ao buscar dados:', err);
+                        document.getElementById('events-list').innerHTML = 
+                            '<div class="empty-state">Erro ao carregar eventos</div>';
+                    });
+                }
+                
+                function updateStatusCards(data) {
+                    document.getElementById('pending-count').textContent = data.pending_pix_orders;
+                    document.getElementById('conversations-count').textContent = data.active_conversations;
+                    document.getElementById('events-count').textContent = allEvents.length;
+                    
+                    const successCount = allEvents.filter(e => e.status === 'success').length;
+                    const successRate = allEvents.length > 0 ? Math.round((successCount / allEvents.length) * 100) : 0;
+                    document.getElementById('success-rate').textContent = successRate + '%';
+                }
+                
+                function processEvents(reports) {
+                    allEvents = reports.map(report => ({
+                        timestamp: new Date(report.timestamp),
+                        timeString: new Date(report.timestamp).toLocaleString('pt-BR'),
+                        event_type: report.type,
+                        status: report.status,
+                        client_name: report.data?.client_name || report.data?.order_code || 'N/A',
+                        client_phone: report.data?.client_number || 'N/A',
+                        product: report.data?.product || 'N/A',
+                        instance: report.data?.instance || 'N/A',
+                        order_code: report.data?.order_code || 'N/A',
+                        error: report.data?.error || null
+                    })).sort((a, b) => b.timestamp - a.timestamp);
+                }
+                
+                function updateSummaryCards() {
+                    const summary = {
+                        total: allEvents.length,
+                        success: allEvents.filter(e => e.status === 'success').length,
+                        failed: allEvents.filter(e => e.status === 'failed').length,
+                        pix_gerado: allEvents.filter(e => e.event_type === 'pix_gerado').length,
+                        venda_aprovada: allEvents.filter(e => e.event_type === 'venda_aprovada').length,
+                        respostas: allEvents.filter(e => e.event_type === 'resposta_01').length
+                    };
+                    
+                    document.getElementById('summary-cards').innerHTML = 
+                        '<div class="summary-card"><div class="summary-number">' + summary.total + '</div><div class="summary-label">Total</div></div>' +
+                        '<div class="summary-card"><div class="summary-number">' + summary.success + '</div><div class="summary-label">Sucesso</div></div>' +
+                        '<div class="summary-card"><div class="summary-number">' + summary.failed + '</div><div class="summary-label">Falhas</div></div>' +
+                        '<div class="summary-card"><div class="summary-number">' + summary.pix_gerado + '</div><div class="summary-label">PIX Gerado</div></div>' +
+                        '<div class="summary-card"><div class="summary-number">' + summary.venda_aprovada + '</div><div class="summary-label">Aprovadas</div></div>' +
+                        '<div class="summary-card"><div class="summary-number">' + summary.respostas + '</div><div class="summary-label">Respostas</div></div>';
+                }
+                
+                function applyFilters() {
+                    const eventFilter = document.getElementById('filter-event').value;
+                    const productFilter = document.getElementById('filter-product').value;
+                    const statusFilter = document.getElementById('filter-status').value;
+                    
+                    filteredEvents = allEvents.filter(event => {
+                        if (eventFilter && event.event_type !== eventFilter) return false;
+                        if (productFilter && event.product !== productFilter) return false;
+                        if (statusFilter && event.status !== statusFilter) return false;
+                        return true;
+                    });
+                    
+                    displayEvents(filteredEvents);
+                }
+                
+                function displayEvents(events) {
+                    const container = document.getElementById('events-list');
+                    
+                    if (events.length === 0) {
+                        container.innerHTML = '<div class="empty-state">Nenhum evento encontrado</div>';
+                        return;
+                    }
+                    
+                    container.innerHTML = events.map(event => {
+                        const eventBadge = getEventBadge(event.event_type);
+                        const productBadge = getProductBadge(event.product);
+                        const statusBadge = getStatusBadge(event.status);
+                        
+                        return '<div class="table-row">' +
+                               '<div class="event-time">' + event.timeString + '</div>' +
+                               '<div class="event-client">' + event.client_name + '</div>' +
+                               '<div class="event-phone">' + event.client_phone + '</div>' +
+                               '<div>' + eventBadge + '</div>' +
+                               '<div>' + productBadge + '</div>' +
+                               '<div><span class="badge badge-info">' + event.instance + '</span></div>' +
+                               '<div>' + statusBadge + '</div>' +
+                               '<div class="event-phone">' + event.order_code + '</div>' +
+                               '</div>';
+                    }).join('');
+                }
+                
+                function getEventBadge(eventType) {
+                    switch(eventType) {
+                        case 'pix_gerado': return '<span class="badge badge-pix">PIX</span>';
+                        case 'venda_aprovada': return '<span class="badge badge-aprovada">PAGA</span>';
+                        case 'resposta_01': return '<span class="badge badge-resposta">RESP</span>';
+                        case 'pix_timeout': return '<span class="badge badge-timeout">TIMEOUT</span>';
+                        default: return '<span class="badge">' + eventType + '</span>';
+                    }
+                }
+                
+                function getProductBadge(product) {
+                    switch(product) {
+                        case 'FAB': return '<span class="badge badge-fab">FAB</span>';
+                        case 'NAT': return '<span class="badge badge-nat">NAT</span>';
+                        case 'CS': return '<span class="badge badge-cs">CS</span>';
+                        default: return '<span class="badge">' + product + '</span>';
+                    }
+                }
+                
+                function getStatusBadge(status) {
+                    return status === 'success' ? 
+                        '<span class="badge badge-success">✓</span>' : 
+                        '<span class="badge badge-failed">✗</span>';
+                }
+                
+                // Atualiza automaticamente a cada 15 segundos
+                setInterval(refreshStatus, 15000);
+                
+                // Carrega dados iniciais
+                refreshStatus();
+            </script>
+        </body>
+        </html>
+    `);
+});<div class="status-value" id="conversations-count">0</div>
                     </div>
                     <div class="status-card warning">
                         <div class="status-label">Envios 24h</div>
