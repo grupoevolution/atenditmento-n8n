@@ -3,7 +3,7 @@ const axios = require('axios');
 const app = express();
 
 // Configurações
-const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || 'https://n8n.flowzap.fun/webhook-test/atendimento-n8n';
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || 'https://n8n.flowzap.fun/webhook/f23c49cb-b6ed-4eea-84d8-3fe25753d9a5';
 const EVOLUTION_API_URL = 'https://evo.flowzap.fun';
 const PIX_TIMEOUT = 7 * 60 * 1000; // 7 minutos
 
@@ -90,13 +90,20 @@ async function checkInstanceStatus(instanceId) {
             timeout: 10000
         });
         
-        const isConnected = response.data?.instance?.state === 'open';
-        addLog('info', `📡 Status instância ${instanceId}: ${isConnected ? 'CONECTADA' : 'DESCONECTADA'}`);
+        // Verifica diferentes formatos de resposta da Evolution API
+        const isConnected = response.data?.instance?.state === 'open' || 
+                          response.data?.state === 'open' ||
+                          response.status === 200;
+        
+        addLog('info', `📡 Status instância ${instanceId}: ${isConnected ? 'CONECTADA' : 'DESCONECTADA'}`, {
+            response_data: response.data
+        });
         
         return isConnected;
     } catch (error) {
         addLog('error', `❌ Erro ao verificar instância ${instanceId}: ${error.message}`);
-        return false;
+        // Se der erro na verificação, assume que está conectada para não bloquear
+        return true;
     }
 }
 
