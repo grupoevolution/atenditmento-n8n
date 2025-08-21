@@ -10,20 +10,24 @@ const PIX_TIMEOUT = 7 * 60 * 1000; // 7 minutos
 // Armazenamento em memória
 let pendingPixOrders = new Map();
 let systemLogs = [];
-let clientInstanceMap = new Map(); // número do cliente -> instância
-let conversationState = new Map(); // número do cliente -> estado da conversa
+let clientInstanceMap = new Map();
+let conversationState = new Map();
 let deliveryReports = [];
+let eventHistory = []; // Novo: histórico completo de eventos
 let instanceCounter = 0;
+let systemStats = {
+    totalEvents: 0,
+    successfulEvents: 0,
+    failedEvents: 0,
+    startTime: new Date()
+};
 
 // Mapeamento dos produtos
 const PRODUCT_MAPPING = {
-    // FAB
     'PPLQQM9AP': 'FAB',
     'PPLQQMAGU': 'FAB', 
     'PPLQQMADF': 'FAB',
-    // NAT
     'PPLQQN0FT': 'NAT',
-    // CS
     'PPLQQMSFH': 'CS',
     'PPLQQMSFI': 'CS'
 };
@@ -41,12 +45,49 @@ const INSTANCES = [
     { name: 'GABY09', id: 'B5783C928EF4-4DB0-ABBA-AF6913116E7B' }
 ];
 
-const LOG_RETENTION_TIME = 60 * 60 * 1000; // 1 hora
-const REPORT_RETENTION_TIME = 24 * 60 * 60 * 1000; // 24 horas
+const LOG_RETENTION_TIME = 24 * 60 * 60 * 1000; // 24 horas
+const EVENT_RETENTION_TIME = 7 * 24 * 60 * 60 * 1000; // 7 dias
 
 app.use(express.json());
 
-// Função para adicionar logs
+// Função para adicionar evento ao histórico
+function addEventToHistory(eventType, status, data) {
+    const event = {
+        id: Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+        timestamp: new Date().toISOString(),
+        date: new Date().toLocaleDateString('pt-BR'),
+        time: new Date().toLocaleTimeString('pt-BR'),
+        type: eventType,
+        status: status,
+        clientName: data.clientName || 'N/A',
+        clientPhone: data.clientPhone || 'N/A',
+        orderCode: data.orderCode || 'N/A',
+        product: data.product || 'N/A',
+        instance: data.instance || 'N/A',
+        amount: data.amount || 0,
+        responseContent: data.responseContent || null,
+        errorMessage: data.errorMessage || null,
+        details: data
+    };
+    
+    eventHistory.unshift(event); // Adiciona no início (mais recente primeiro)
+    
+    // Remove eventos mais antigos que 7 dias
+    const sevenDaysAgo = Date.now() - EVENT_RETENTION_TIME;
+    eventHistory = eventHistory.filter(e => new Date(e.timestamp).getTime() > sevenDaysAgo);
+    
+    // Atualiza estatísticas
+    systemStats.totalEvents++;
+    if (status === 'success') {
+        systemStats.successfulEvents++;
+    } else if (status === 'failed') {
+        systemStats.failedEvents++;
+    }
+    
+    return event;
+}
+
+// Função melhorada para adicionar logs
 function addLog(type, message, data = null) {
     const logEntry = {
         timestamp: new Date().toISOString(),
@@ -58,9 +99,9 @@ function addLog(type, message, data = null) {
     systemLogs.push(logEntry);
     console.log(`[${logEntry.timestamp}] ${type.toUpperCase()}: ${message}`);
     
-    // Remove logs mais antigos que 1 hora
-    const oneHourAgo = Date.now() - LOG_RETENTION_TIME;
-    systemLogs = systemLogs.filter(log => new Date(log.timestamp).getTime() > oneHourAgo);
+    // Remove logs mais antigos que 24 horas
+    const twentyFourHoursAgo = Date.now() - LOG_RETENTION_TIME;
+    systemLogs = systemLogs.filter(log => new Date(log.timestamp).getTime() > twentyFourHoursAgo);
 }
 
 // Função para adicionar relatório de entrega
@@ -68,14 +109,14 @@ function addDeliveryReport(type, status, data) {
     const report = {
         timestamp: new Date().toISOString(),
         type: type,
-        status: status, // 'success' ou 'failed'
+        status: status,
         data: data
     };
     
     deliveryReports.push(report);
     
     // Remove relatórios mais antigos que 24 horas
-    const twentyFourHoursAgo = Date.now() - REPORT_RETENTION_TIME;
+    const twentyFourHoursAgo = Date.now() - LOG_RETENTION_TIME;
     deliveryReports = deliveryReports.filter(report => 
         new Date(report.timestamp).getTime() > twentyFourHoursAgo
     );
@@ -90,7 +131,6 @@ async function checkInstanceStatus(instanceId) {
             timeout: 10000
         });
         
-        // Verifica diferentes formatos de resposta da Evolution API
         const isConnected = response.data?.instance?.state === 'open' || 
                           response.data?.state === 'open' ||
                           response.status === 200;
@@ -102,14 +142,12 @@ async function checkInstanceStatus(instanceId) {
         return isConnected;
     } catch (error) {
         addLog('error', `❌ Erro ao verificar instância ${instanceId}: ${error.message}`);
-        // Se der erro na verificação, assume que está conectada para não bloquear
-        return true;
+        return true; // Assume conectada em caso de erro
     }
 }
 
 // Função para obter instância disponível
 async function getAvailableInstance(clientNumber) {
-    // Se cliente já tem instância atribuída, verifica se ainda está conectada
     if (clientInstanceMap.has(clientNumber)) {
         const assignedInstance = clientInstanceMap.get(clientNumber);
         const instanceData = INSTANCES.find(i => i.name === assignedInstance);
@@ -126,7 +164,6 @@ async function getAvailableInstance(clientNumber) {
         }
     }
     
-    // Busca instância disponível sequencialmente
     for (let i = 0; i < INSTANCES.length; i++) {
         const instance = INSTANCES[instanceCounter % INSTANCES.length];
         instanceCounter++;
@@ -139,24 +176,21 @@ async function getAvailableInstance(clientNumber) {
         }
     }
     
-    // Se nenhuma instância disponível, usa a primeira mesmo assim
     const fallbackInstance = INSTANCES[0].name;
     clientInstanceMap.set(clientNumber, fallbackInstance);
     addLog('error', `⚠️ Nenhuma instância conectada! Usando ${fallbackInstance} para ${clientNumber}`);
     return fallbackInstance;
 }
 
-// Função para extrair primeiro nome
+// Funções auxiliares
 function getFirstName(fullName) {
     return fullName ? fullName.split(' ')[0] : 'Cliente';
 }
 
-// Função para formar número de telefone
 function formatPhoneNumber(extension, areaCode, number) {
     return `${extension}${areaCode}${number}`;
 }
 
-// Função para identificar produto pelo código do plano
 function getProductByPlanCode(planCode) {
     return PRODUCT_MAPPING[planCode] || 'UNKNOWN';
 }
@@ -170,7 +204,6 @@ app.post('/webhook/perfect', async (req, res) => {
         const planCode = data.plan?.code;
         const product = getProductByPlanCode(planCode);
         
-        // Dados do cliente
         const fullName = data.customer?.full_name || 'Cliente';
         const firstName = getFirstName(fullName);
         const phoneNumber = formatPhoneNumber(
@@ -181,42 +214,27 @@ app.post('/webhook/perfect', async (req, res) => {
         const amount = data.sale_amount || 0;
         const pixUrl = data.billet_url || '';
         
-        addLog('webhook_received', `Perfect: ${orderCode} | Status: ${status} | Produto: ${product} | Cliente: ${firstName} | Fone: ${phoneNumber}`, {
-            order_code: orderCode,
-            status: status,
-            product: product,
-            client_name: firstName,
-            phone: phoneNumber,
-            plan_code: planCode
-        });
+        addLog('webhook_received', `Perfect: ${orderCode} | Status: ${status} | Produto: ${product} | Cliente: ${firstName} | Fone: ${phoneNumber}`);
         
         if (status === 'approved') {
             // VENDA APROVADA
             addLog('info', `✅ VENDA APROVADA - ${orderCode} | Produto: ${product}`);
             
-            // Remove da lista de PIX pendentes
             if (pendingPixOrders.has(orderCode)) {
                 clearTimeout(pendingPixOrders.get(orderCode).timeout);
                 pendingPixOrders.delete(orderCode);
                 addLog('info', `🗑️ PIX pendente removido: ${orderCode}`);
             }
             
-            // Busca instância do cliente (mantém a mesma se já existir)
-            let instance;
-            if (clientInstanceMap.has(phoneNumber)) {
-                instance = clientInstanceMap.get(phoneNumber);
-                addLog('info', `✅ Mantendo cliente ${phoneNumber} na instância ${instance}`);
-            } else {
-                instance = await getAvailableInstance(phoneNumber);
-            }
+            const instance = clientInstanceMap.has(phoneNumber) 
+                ? clientInstanceMap.get(phoneNumber)
+                : await getAvailableInstance(phoneNumber);
             
-            // Atualiza estado da conversa
             if (conversationState.has(phoneNumber)) {
                 conversationState.get(phoneNumber).original_event = 'aprovada';
                 conversationState.get(phoneNumber).instance = instance;
             }
             
-            // Envia para N8N
             const eventData = {
                 event_type: 'venda_aprovada',
                 produto: product,
@@ -237,6 +255,18 @@ app.post('/webhook/perfect', async (req, res) => {
             };
             
             const sendResult = await sendToN8N(eventData, 'venda_aprovada');
+            
+            // Adiciona ao histórico de eventos
+            addEventToHistory('venda_aprovada', sendResult.success ? 'success' : 'failed', {
+                clientName: fullName,
+                clientPhone: phoneNumber,
+                orderCode: orderCode,
+                product: product,
+                instance: instance,
+                amount: amount,
+                errorMessage: sendResult.error
+            });
+            
             addDeliveryReport('venda_aprovada', sendResult.success ? 'success' : 'failed', {
                 order_code: orderCode,
                 product: product,
@@ -248,15 +278,12 @@ app.post('/webhook/perfect', async (req, res) => {
             // PIX GERADO
             addLog('info', `⏳ PIX GERADO - ${orderCode} | Produto: ${product} | Cliente: ${firstName}`);
             
-            // Cancela timeout anterior se existir
             if (pendingPixOrders.has(orderCode)) {
                 clearTimeout(pendingPixOrders.get(orderCode).timeout);
             }
             
-            // Busca instância disponível
             const instance = await getAvailableInstance(phoneNumber);
             
-            // Inicializa estado da conversa
             conversationState.set(phoneNumber, {
                 order_code: orderCode,
                 product: product,
@@ -264,10 +291,10 @@ app.post('/webhook/perfect', async (req, res) => {
                 original_event: 'pix',
                 response_count: 0,
                 last_system_message: null,
-                waiting_for_response: false
+                waiting_for_response: false,
+                client_name: fullName
             });
             
-            // Cria timeout de 7 minutos
             const timeout = setTimeout(async () => {
                 addLog('timeout', `⏰ TIMEOUT PIX: ${orderCode} - Enviando PIX não pago`);
                 pendingPixOrders.delete(orderCode);
@@ -293,6 +320,18 @@ app.post('/webhook/perfect', async (req, res) => {
                 };
                 
                 const sendResult = await sendToN8N(eventData, 'pix_timeout');
+                
+                // Adiciona ao histórico
+                addEventToHistory('pix_timeout', sendResult.success ? 'success' : 'failed', {
+                    clientName: fullName,
+                    clientPhone: phoneNumber,
+                    orderCode: orderCode,
+                    product: product,
+                    instance: instance,
+                    amount: amount,
+                    errorMessage: sendResult.error
+                });
+                
                 addDeliveryReport('pix_timeout', sendResult.success ? 'success' : 'failed', {
                     order_code: orderCode,
                     product: product,
@@ -301,7 +340,6 @@ app.post('/webhook/perfect', async (req, res) => {
                 });
             }, PIX_TIMEOUT);
             
-            // Armazena pedido pendente
             pendingPixOrders.set(orderCode, {
                 data: data,
                 timeout: timeout,
@@ -309,10 +347,11 @@ app.post('/webhook/perfect', async (req, res) => {
                 product: product,
                 instance: instance,
                 phone: phoneNumber,
-                first_name: firstName
+                first_name: firstName,
+                full_name: fullName,
+                amount: amount
             });
             
-            // Envia evento PIX gerado para N8N
             const eventData = {
                 event_type: 'pix_gerado',
                 produto: product,
@@ -334,6 +373,18 @@ app.post('/webhook/perfect', async (req, res) => {
             };
             
             const sendResult = await sendToN8N(eventData, 'pix_gerado');
+            
+            // Adiciona ao histórico
+            addEventToHistory('pix_gerado', sendResult.success ? 'success' : 'failed', {
+                clientName: fullName,
+                clientPhone: phoneNumber,
+                orderCode: orderCode,
+                product: product,
+                instance: instance,
+                amount: amount,
+                errorMessage: sendResult.error
+            });
+            
             addDeliveryReport('pix_gerado', sendResult.success ? 'success' : 'failed', {
                 order_code: orderCode,
                 product: product,
@@ -371,21 +422,13 @@ app.post('/webhook/evolution', async (req, res) => {
         const messageContent = messageData.message?.conversation || '';
         const instanceId = messageData.instanceId;
         
-        // Extrai número do cliente do remoteJid (remove @s.whatsapp.net)
         const clientNumber = remoteJid.replace('@s.whatsapp.net', '');
         
-        // Encontra nome da instância pelo ID
         const instance = INSTANCES.find(i => i.id === instanceId);
         const instanceName = instance ? instance.name : 'UNKNOWN';
         
-        addLog('evolution_webhook', `Evolution: ${clientNumber} | FromMe: ${fromMe} | Instância: ${instanceName}`, {
-            client_number: clientNumber,
-            from_me: fromMe,
-            instance: instanceName,
-            message: messageContent.substring(0, 100)
-        });
+        addLog('evolution_webhook', `Evolution: ${clientNumber} | FromMe: ${fromMe} | Instância: ${instanceName}`);
         
-        // Verifica se temos estado da conversa para este cliente
         if (!conversationState.has(clientNumber)) {
             addLog('info', `❓ Cliente ${clientNumber} não encontrado no estado de conversa`);
             return res.status(200).json({ success: true, message: 'Cliente não encontrado' });
@@ -399,23 +442,32 @@ app.post('/webhook/evolution', async (req, res) => {
             clientState.waiting_for_response = true;
             addLog('info', `📤 Sistema enviou mensagem para ${clientNumber} via ${instanceName}`);
             
+            // Adiciona ao histórico
+            addEventToHistory('mensagem_enviada', 'success', {
+                clientName: clientState.client_name || 'Cliente',
+                clientPhone: clientNumber,
+                orderCode: clientState.order_code,
+                product: clientState.product,
+                instance: instanceName,
+                responseContent: messageContent.substring(0, 100)
+            });
+            
         } else {
             // RESPOSTA DO CLIENTE
             if (clientState.waiting_for_response && clientState.response_count === 0) {
-                // APENAS A PRIMEIRA RESPOSTA
                 clientState.response_count = 1;
                 clientState.waiting_for_response = false;
                 
                 addLog('info', `📥 PRIMEIRA RESPOSTA do cliente ${clientNumber}: "${messageContent.substring(0, 50)}..."`);
                 
-                // Envia evento de resposta para N8N
                 const eventData = {
                     event_type: 'resposta_01',
                     produto: clientState.product,
                     instancia: clientState.instance,
                     evento_origem: clientState.original_event,
                     cliente: {
-                        telefone: clientNumber
+                        telefone: clientNumber,
+                        nome: clientState.client_name
                     },
                     resposta: {
                         numero: 1,
@@ -430,6 +482,18 @@ app.post('/webhook/evolution', async (req, res) => {
                 };
                 
                 const sendResult = await sendToN8N(eventData, 'resposta_01');
+                
+                // Adiciona ao histórico
+                addEventToHistory('resposta_cliente', sendResult.success ? 'success' : 'failed', {
+                    clientName: clientState.client_name || 'Cliente',
+                    clientPhone: clientNumber,
+                    orderCode: clientState.order_code,
+                    product: clientState.product,
+                    instance: clientState.instance,
+                    responseContent: messageContent,
+                    errorMessage: sendResult.error
+                });
+                
                 addDeliveryReport('resposta_01', sendResult.success ? 'success' : 'failed', {
                     client_number: clientNumber,
                     product: clientState.product,
@@ -437,11 +501,10 @@ app.post('/webhook/evolution', async (req, res) => {
                     error: sendResult.error
                 });
                 
-                // Atualiza estado - marca como já respondido
                 conversationState.set(clientNumber, clientState);
                 
             } else if (clientState.response_count > 0) {
-                addLog('info', `📝 Resposta adicional ignorada do cliente ${clientNumber} (já enviou resposta_01)`);
+                addLog('info', `📝 Resposta adicional ignorada do cliente ${clientNumber}`);
             } else {
                 addLog('info', `📝 Mensagem do cliente ${clientNumber} antes do sistema enviar mensagem`);
             }
@@ -474,12 +537,7 @@ async function sendToN8N(eventData, eventType) {
             timeout: 15000
         });
         
-        addLog('webhook_sent', `✅ Enviado para N8N: ${eventType} | Status: ${response.status}`, {
-            event_type: eventType,
-            product: eventData.produto,
-            instance: eventData.instancia,
-            status: response.status
-        });
+        addLog('webhook_sent', `✅ Enviado para N8N: ${eventType} | Status: ${response.status}`);
         
         return { success: true, status: response.status, data: response.data };
         
@@ -488,16 +546,15 @@ async function sendToN8N(eventData, eventType) {
             `HTTP ${error.response.status}: ${error.response.statusText}` : 
             error.message;
             
-        addLog('error', `❌ ERRO N8N: ${eventType} | ${errorMessage}`, {
-            event_type: eventType,
-            error: errorMessage
-        });
+        addLog('error', `❌ ERRO N8N: ${eventType} | ${errorMessage}`);
         
         return { success: false, error: errorMessage };
     }
 }
 
-// Endpoint de status
+// API Endpoints
+
+// Status principal
 app.get('/status', (req, res) => {
     const pendingList = Array.from(pendingPixOrders.entries()).map(([code, order]) => ({
         code: code,
@@ -505,6 +562,8 @@ app.get('/status', (req, res) => {
         instance: order.instance,
         phone: order.phone,
         first_name: order.first_name,
+        full_name: order.full_name,
+        amount: order.amount,
         created_at: order.timestamp,
         remaining_time: Math.max(0, PIX_TIMEOUT - (new Date() - order.timestamp))
     }));
@@ -516,10 +575,10 @@ app.get('/status', (req, res) => {
         instance: state.instance,
         response_count: state.response_count,
         waiting_for_response: state.waiting_for_response,
-        original_event: state.original_event
+        original_event: state.original_event,
+        client_name: state.client_name
     }));
     
-    // Estatísticas dos últimos relatórios
     const reportStats = {
         total_events: deliveryReports.length,
         successful: deliveryReports.filter(r => r.status === 'success').length,
@@ -532,41 +591,935 @@ app.get('/status', (req, res) => {
     res.json({
         system_status: 'online',
         timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
         pending_pix_orders: pendingPixOrders.size,
         active_conversations: conversationState.size,
         client_instance_mappings: Array.from(clientInstanceMap.entries()).length,
         orders: pendingList,
         conversations: conversationList,
         delivery_reports: reportStats,
-        logs_last_hour: systemLogs,
+        system_stats: systemStats,
         evolution_api_url: EVOLUTION_API_URL,
         n8n_webhook_url: N8N_WEBHOOK_URL
     });
 });
 
-// Endpoint para relatórios de entrega
-app.get('/delivery-reports', (req, res) => {
+// Histórico de eventos
+app.get('/events', (req, res) => {
+    const { type, status, date, limit = 100 } = req.query;
+    
+    let filteredEvents = eventHistory;
+    
+    if (type) {
+        filteredEvents = filteredEvents.filter(e => e.type === type);
+    }
+    
+    if (status) {
+        filteredEvents = filteredEvents.filter(e => e.status === status);
+    }
+    
+    if (date) {
+        filteredEvents = filteredEvents.filter(e => e.date === date);
+    }
+    
     res.json({
-        reports: deliveryReports,
-        summary: {
-            total: deliveryReports.length,
-            successful: deliveryReports.filter(r => r.status === 'success').length,
-            failed: deliveryReports.filter(r => r.status === 'failed').length,
-            last_24h: deliveryReports.length
+        total: filteredEvents.length,
+        events: filteredEvents.slice(0, parseInt(limit))
+    });
+});
+
+// Estatísticas do sistema
+app.get('/stats', (req, res) => {
+    const uptime = process.uptime();
+    const uptimeHours = Math.floor(uptime / 3600);
+    const uptimeMinutes = Math.floor((uptime % 3600) / 60);
+    
+    res.json({
+        system: {
+            status: 'online',
+            uptime: `${uptimeHours}h ${uptimeMinutes}m`,
+            startTime: systemStats.startTime,
+            currentTime: new Date().toISOString()
+        },
+        events: {
+            total: systemStats.totalEvents,
+            successful: systemStats.successfulEvents,
+            failed: systemStats.failedEvents,
+            successRate: systemStats.totalEvents > 0 
+                ? ((systemStats.successfulEvents / systemStats.totalEvents) * 100).toFixed(2) + '%'
+                : '0%'
+        },
+        current: {
+            pendingPix: pendingPixOrders.size,
+            activeConversations: conversationState.size,
+            instanceMappings: clientInstanceMap.size
+        },
+        history: {
+            eventsLast24h: eventHistory.filter(e => 
+                new Date(e.timestamp).getTime() > Date.now() - 86400000
+            ).length,
+            eventsLast7d: eventHistory.length
         }
     });
 });
 
-// Endpoint para configurar URL do N8N
-app.post('/config/n8n-url', (req, res) => {
-    const { url } = req.body;
-    if (url) {
-        process.env.N8N_WEBHOOK_URL = url;
-        addLog('info', `⚙️ URL N8N atualizada: ${url}`);
-        res.json({ success: true, message: 'URL N8N configurada' });
-    } else {
-        res.status(400).json({ success: false, message: 'URL não fornecida' });
-    }
+// Interface HTML melhorada
+app.get('/', (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <title>Sistema Webhook Evolution - Painel Completo</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        :root {
+            --primary: #667eea;
+            --primary-dark: #5a67d8;
+            --secondary: #764ba2;
+            --success: #48bb78;
+            --warning: #ed8936;
+            --danger: #f56565;
+            --info: #4299e1;
+            --dark: #2d3748;
+            --gray: #718096;
+            --light: #f7fafc;
+            --white: #ffffff;
+        }
+        
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container { 
+            max-width: 1600px; 
+            margin: 0 auto; 
+        }
+        
+        .header {
+            background: rgba(255, 255, 255, 0.98);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        h1 { 
+            color: var(--dark); 
+            font-size: 2.5rem; 
+            font-weight: 700; 
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card { 
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.08);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0,0,0,0.12);
+        }
+        
+        .stat-card.success { border-left: 4px solid var(--success); }
+        .stat-card.warning { border-left: 4px solid var(--warning); }
+        .stat-card.info { border-left: 4px solid var(--info); }
+        .stat-card.danger { border-left: 4px solid var(--danger); }
+        
+        .stat-label {
+            font-size: 0.9rem;
+            color: var(--gray);
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: var(--dark);
+        }
+        
+        .stat-change {
+            font-size: 0.85rem;
+            color: var(--gray);
+            margin-top: 5px;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-bottom: 30px;
+        }
+        
+        .btn { 
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white; 
+            border: none; 
+            padding: 12px 25px; 
+            border-radius: 25px; 
+            cursor: pointer; 
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: var(--gray);
+        }
+        
+        .btn-success {
+            background: var(--success);
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid var(--light);
+        }
+        
+        .tab {
+            padding: 12px 24px;
+            background: none;
+            border: none;
+            color: var(--gray);
+            font-weight: 600;
+            cursor: pointer;
+            position: relative;
+            transition: color 0.3s ease;
+        }
+        
+        .tab.active {
+            color: var(--primary);
+        }
+        
+        .tab.active::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--primary);
+        }
+        
+        .content-panel {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            min-height: 400px;
+        }
+        
+        .filters {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .filter-label {
+            font-size: 0.85rem;
+            color: var(--gray);
+            font-weight: 600;
+        }
+        
+        .filter-input, .filter-select {
+            padding: 8px 15px;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 0.95rem;
+        }
+        
+        .table-container {
+            overflow-x: auto;
+            margin-top: 20px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th {
+            background: var(--light);
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--dark);
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        td {
+            padding: 12px;
+            border-bottom: 1px solid var(--light);
+            font-size: 0.95rem;
+            color: var(--dark);
+        }
+        
+        tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .badge-success {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+        
+        .badge-warning {
+            background: #fbd38d;
+            color: #975a16;
+        }
+        
+        .badge-danger {
+            background: #fed7d7;
+            color: #742a2a;
+        }
+        
+        .badge-info {
+            background: #bee3f8;
+            color: #2c5282;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--gray);
+        }
+        
+        .empty-state svg {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--gray);
+        }
+        
+        .spinner {
+            border: 3px solid var(--light);
+            border-top: 3px solid var(--primary);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .conversation-item {
+            background: var(--light);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+        
+        .conversation-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .conversation-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            font-size: 0.9rem;
+        }
+        
+        .detail-item {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .detail-label {
+            font-size: 0.8rem;
+            color: var(--gray);
+            margin-bottom: 2px;
+        }
+        
+        .detail-value {
+            color: var(--dark);
+            font-weight: 500;
+        }
+        
+        @media (max-width: 768px) {
+            body { padding: 10px; }
+            .container { padding: 0; }
+            .header { padding: 20px; }
+            h1 { font-size: 1.8rem; }
+            .stats-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+            .filters { flex-direction: column; }
+            .tabs { overflow-x: auto; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Sistema Webhook Evolution</h1>
+            
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-card success">
+                    <div class="stat-label">PIX Pendentes</div>
+                    <div class="stat-value" id="pending-pix">0</div>
+                    <div class="stat-change" id="pending-change"></div>
+                </div>
+                
+                <div class="stat-card info">
+                    <div class="stat-label">Conversas Ativas</div>
+                    <div class="stat-value" id="active-conversations">0</div>
+                    <div class="stat-change" id="conversations-change"></div>
+                </div>
+                
+                <div class="stat-card warning">
+                    <div class="stat-label">Eventos Hoje</div>
+                    <div class="stat-value" id="events-today">0</div>
+                    <div class="stat-change" id="events-change"></div>
+                </div>
+                
+                <div class="stat-card success">
+                    <div class="stat-label">Taxa de Sucesso</div>
+                    <div class="stat-value" id="success-rate">0%</div>
+                    <div class="stat-change" id="rate-change"></div>
+                </div>
+            </div>
+            
+            <div class="controls">
+                <button class="btn" onclick="refreshData()">
+                    🔄 Atualizar Dados
+                </button>
+                <button class="btn btn-secondary" onclick="exportData()">
+                    📊 Exportar Relatório
+                </button>
+                <button class="btn btn-success" onclick="clearFilters()">
+                    🧹 Limpar Filtros
+                </button>
+            </div>
+        </div>
+        
+        <div class="content-panel">
+            <div class="tabs">
+                <button class="tab active" onclick="switchTab('events')">
+                    📋 Histórico de Eventos
+                </button>
+                <button class="tab" onclick="switchTab('pending')">
+                    ⏳ PIX Pendentes
+                </button>
+                <button class="tab" onclick="switchTab('conversations')">
+                    💬 Conversas Ativas
+                </button>
+                <button class="tab" onclick="switchTab('logs')">
+                    📝 Logs do Sistema
+                </button>
+                <button class="tab" onclick="switchTab('stats')">
+                    📈 Estatísticas
+                </button>
+            </div>
+            
+            <div id="tab-content">
+                <!-- Conteúdo dinâmico será inserido aqui -->
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let currentTab = 'events';
+        let currentData = {
+            status: null,
+            events: [],
+            stats: null
+        };
+        
+        // Função para alternar abas
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            loadTabContent();
+        }
+        
+        // Carregar conteúdo da aba
+        function loadTabContent() {
+            const content = document.getElementById('tab-content');
+            content.innerHTML = '<div class="loading"><div class="spinner"></div>Carregando...</div>';
+            
+            switch(currentTab) {
+                case 'events':
+                    loadEventsTab();
+                    break;
+                case 'pending':
+                    loadPendingTab();
+                    break;
+                case 'conversations':
+                    loadConversationsTab();
+                    break;
+                case 'logs':
+                    loadLogsTab();
+                    break;
+                case 'stats':
+                    loadStatsTab();
+                    break;
+            }
+        }
+        
+        // Aba de Eventos
+        async function loadEventsTab() {
+            try {
+                const response = await fetch('/events?limit=200');
+                const data = await response.json();
+                
+                const content = document.getElementById('tab-content');
+                
+                if (data.events.length === 0) {
+                    content.innerHTML = `
+                        <div class="empty-state">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/>
+                                <path fill-rule="evenodd" d="M4 5a2 2 0 012-2 1 1 0 000 2H6a2 2 0 00-2 2v6h16V7a2 2 0 00-2-2h-.01a1 1 0 100-2H18a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 011-1h.01a1 1 0 110 2H8a1 1 0 01-1-1zm7-1a1 1 0 100 2h.01a1 1 0 100-2H14zm1 7a1 1 0 011-1h.01a1 1 0 110 2H16a1 1 0 01-1-1zm-7-1a1 1 0 100 2h.01a1 1 0 100-2H8z"/>
+                            </svg>
+                            <h3>Nenhum evento registrado</h3>
+                            <p>Os eventos aparecerão aqui quando ocorrerem</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                content.innerHTML = `
+                    <div class="filters">
+                        <div class="filter-group">
+                            <label class="filter-label">Tipo de Evento</label>
+                            <select class="filter-select" id="filter-type" onchange="filterEvents()">
+                                <option value="">Todos</option>
+                                <option value="pix_gerado">PIX Gerado</option>
+                                <option value="venda_aprovada">Venda Aprovada</option>
+                                <option value="pix_timeout">PIX Timeout</option>
+                                <option value="resposta_cliente">Resposta Cliente</option>
+                                <option value="mensagem_enviada">Mensagem Enviada</option>
+                            </select>
+                        </div>
+                        
+                        <div class="filter-group">
+                            <label class="filter-label">Status</label>
+                            <select class="filter-select" id="filter-status" onchange="filterEvents()">
+                                <option value="">Todos</option>
+                                <option value="success">Sucesso</option>
+                                <option value="failed">Falha</option>
+                            </select>
+                        </div>
+                        
+                        <div class="filter-group">
+                            <label class="filter-label">Buscar</label>
+                            <input type="text" class="filter-input" id="filter-search" 
+                                   placeholder="Nome, telefone, pedido..." onkeyup="filterEvents()">
+                        </div>
+                    </div>
+                    
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Data/Hora</th>
+                                    <th>Tipo</th>
+                                    <th>Status</th>
+                                    <th>Cliente</th>
+                                    <th>Telefone</th>
+                                    <th>Pedido</th>
+                                    <th>Produto</th>
+                                    <th>Instância</th>
+                                    <th>Detalhes</th>
+                                </tr>
+                            </thead>
+                            <tbody id="events-tbody">
+                                ${data.events.map(event => `
+                                    <tr>
+                                        <td>${event.date} ${event.time}</td>
+                                        <td><span class="badge badge-info">${formatEventType(event.type)}</span></td>
+                                        <td><span class="badge badge-${event.status === 'success' ? 'success' : 'danger'}">${event.status}</span></td>
+                                        <td>${event.clientName}</td>
+                                        <td>${event.clientPhone}</td>
+                                        <td>${event.orderCode}</td>
+                                        <td><span class="badge badge-warning">${event.product}</span></td>
+                                        <td>${event.instance}</td>
+                                        <td>${getEventDetails(event)}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+                
+                currentData.events = data.events;
+            } catch (error) {
+                console.error('Erro ao carregar eventos:', error);
+            }
+        }
+        
+        // Aba de PIX Pendentes
+        async function loadPendingTab() {
+            const content = document.getElementById('tab-content');
+            
+            if (!currentData.status || currentData.status.orders.length === 0) {
+                content.innerHTML = `
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <h3>Nenhum PIX pendente</h3>
+                        <p>Os PIX pendentes aparecerão aqui</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            content.innerHTML = `
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Código</th>
+                                <th>Cliente</th>
+                                <th>Telefone</th>
+                                <th>Produto</th>
+                                <th>Valor</th>
+                                <th>Instância</th>
+                                <th>Tempo Restante</th>
+                                <th>Criado em</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${currentData.status.orders.map(order => {
+                                const minutes = Math.floor(order.remaining_time / 1000 / 60);
+                                const seconds = Math.floor((order.remaining_time / 1000) % 60);
+                                return `
+                                    <tr>
+                                        <td><strong>${order.code}</strong></td>
+                                        <td>${order.full_name}</td>
+                                        <td>${order.phone}</td>
+                                        <td><span class="badge badge-warning">${order.product}</span></td>
+                                        <td>R$ ${order.amount.toFixed(2)}</td>
+                                        <td><span class="badge badge-info">${order.instance}</span></td>
+                                        <td><span class="badge badge-${minutes < 2 ? 'danger' : 'warning'}">${minutes}:${seconds.toString().padStart(2, '0')}</span></td>
+                                        <td>${new Date(order.created_at).toLocaleString('pt-BR')}</td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        }
+        
+        // Aba de Conversas Ativas
+        async function loadConversationsTab() {
+            const content = document.getElementById('tab-content');
+            
+            if (!currentData.status || currentData.status.conversations.length === 0) {
+                content.innerHTML = `
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                        </svg>
+                        <h3>Nenhuma conversa ativa</h3>
+                        <p>As conversas ativas aparecerão aqui</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            content.innerHTML = `
+                <div>
+                    ${currentData.status.conversations.map(conv => `
+                        <div class="conversation-item">
+                            <div class="conversation-header">
+                                <strong>${conv.client_name || 'Cliente'} - ${conv.phone}</strong>
+                                <div>
+                                    <span class="badge badge-${conv.waiting_for_response ? 'warning' : 'success'}">
+                                        ${conv.waiting_for_response ? 'Aguardando Resposta' : 'Respondido'}
+                                    </span>
+                                </div>
+                            </div>
+                            <div class="conversation-details">
+                                <div class="detail-item">
+                                    <span class="detail-label">Pedido</span>
+                                    <span class="detail-value">${conv.order_code}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Produto</span>
+                                    <span class="detail-value">${conv.product}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Instância</span>
+                                    <span class="detail-value">${conv.instance}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Respostas</span>
+                                    <span class="detail-value">${conv.response_count}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Evento Original</span>
+                                    <span class="detail-value">${conv.original_event}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+        
+        // Aba de Logs
+        async function loadLogsTab() {
+            const content = document.getElementById('tab-content');
+            content.innerHTML = `
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Horário</th>
+                                <th>Tipo</th>
+                                <th>Mensagem</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${currentData.status ? currentData.status.logs_last_hour?.slice(0, 100).map(log => `
+                                <tr>
+                                    <td>${new Date(log.timestamp).toLocaleTimeString('pt-BR')}</td>
+                                    <td><span class="badge badge-${getLogBadgeClass(log.type)}">${log.type}</span></td>
+                                    <td>${log.message}</td>
+                                </tr>
+                            `).join('') : ''}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        }
+        
+        // Aba de Estatísticas
+        async function loadStatsTab() {
+            try {
+                const response = await fetch('/stats');
+                const stats = await response.json();
+                
+                const content = document.getElementById('tab-content');
+                content.innerHTML = `
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">Status do Sistema</div>
+                            <div class="stat-value">Online</div>
+                            <div class="stat-change">Uptime: ${stats.system.uptime}</div>
+                        </div>
+                        
+                        <div class="stat-card success">
+                            <div class="stat-label">Taxa de Sucesso</div>
+                            <div class="stat-value">${stats.events.successRate}</div>
+                            <div class="stat-change">${stats.events.successful} de ${stats.events.total} eventos</div>
+                        </div>
+                        
+                        <div class="stat-card info">
+                            <div class="stat-label">Eventos (24h)</div>
+                            <div class="stat-value">${stats.history.eventsLast24h}</div>
+                            <div class="stat-change">Total em 7 dias: ${stats.history.eventsLast7d}</div>
+                        </div>
+                        
+                        <div class="stat-card warning">
+                            <div class="stat-label">Ativos Agora</div>
+                            <div class="stat-value">${stats.current.pendingPix + stats.current.activeConversations}</div>
+                            <div class="stat-change">${stats.current.pendingPix} PIX, ${stats.current.activeConversations} conversas</div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Erro ao carregar estatísticas:', error);
+            }
+        }
+        
+        // Funções auxiliares
+        function formatEventType(type) {
+            const types = {
+                'pix_gerado': 'PIX Gerado',
+                'venda_aprovada': 'Venda Aprovada',
+                'pix_timeout': 'PIX Timeout',
+                'resposta_cliente': 'Resposta Cliente',
+                'mensagem_enviada': 'Mensagem Enviada'
+            };
+            return types[type] || type;
+        }
+        
+        function getEventDetails(event) {
+            if (event.responseContent) {
+                return event.responseContent.substring(0, 50) + '...';
+            }
+            if (event.errorMessage) {
+                return `Erro: ${event.errorMessage}`;
+            }
+            if (event.amount) {
+                return `R$ ${event.amount.toFixed(2)}`;
+            }
+            return '-';
+        }
+        
+        function getLogBadgeClass(type) {
+            if (type === 'error') return 'danger';
+            if (type === 'warning' || type === 'timeout') return 'warning';
+            if (type === 'webhook_sent') return 'success';
+            return 'info';
+        }
+        
+        // Filtrar eventos
+        function filterEvents() {
+            const type = document.getElementById('filter-type').value;
+            const status = document.getElementById('filter-status').value;
+            const search = document.getElementById('filter-search').value.toLowerCase();
+            
+            let filtered = currentData.events;
+            
+            if (type) {
+                filtered = filtered.filter(e => e.type === type);
+            }
+            
+            if (status) {
+                filtered = filtered.filter(e => e.status === status);
+            }
+            
+            if (search) {
+                filtered = filtered.filter(e => 
+                    e.clientName.toLowerCase().includes(search) ||
+                    e.clientPhone.includes(search) ||
+                    e.orderCode.toLowerCase().includes(search)
+                );
+            }
+            
+            const tbody = document.getElementById('events-tbody');
+            tbody.innerHTML = filtered.map(event => `
+                <tr>
+                    <td>${event.date} ${event.time}</td>
+                    <td><span class="badge badge-info">${formatEventType(event.type)}</span></td>
+                    <td><span class="badge badge-${event.status === 'success' ? 'success' : 'danger'}">${event.status}</span></td>
+                    <td>${event.clientName}</td>
+                    <td>${event.clientPhone}</td>
+                    <td>${event.orderCode}</td>
+                    <td><span class="badge badge-warning">${event.product}</span></td>
+                    <td>${event.instance}</td>
+                    <td>${getEventDetails(event)}</td>
+                </tr>
+            `).join('');
+        }
+        
+        // Limpar filtros
+        function clearFilters() {
+            document.getElementById('filter-type').value = '';
+            document.getElementById('filter-status').value = '';
+            document.getElementById('filter-search').value = '';
+            filterEvents();
+        }
+        
+        // Atualizar dados
+        async function refreshData() {
+            try {
+                const response = await fetch('/status');
+                currentData.status = await response.json();
+                
+                // Atualizar cards de estatísticas
+                document.getElementById('pending-pix').textContent = currentData.status.pending_pix_orders;
+                document.getElementById('active-conversations').textContent = currentData.status.active_conversations;
+                
+                const statsResponse = await fetch('/stats');
+                const stats = await statsResponse.json();
+                
+                document.getElementById('events-today').textContent = stats.history.eventsLast24h;
+                document.getElementById('success-rate').textContent = stats.events.successRate;
+                
+                // Recarregar conteúdo da aba atual
+                loadTabContent();
+            } catch (error) {
+                console.error('Erro ao atualizar dados:', error);
+            }
+        }
+        
+        // Exportar dados
+        function exportData() {
+            const data = {
+                timestamp: new Date().toISOString(),
+                status: currentData.status,
+                events: currentData.events
+            };
+            
+            const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `relatorio_webhook_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+        }
+        
+        // Inicialização
+        document.addEventListener('DOMContentLoaded', () => {
+            refreshData();
+            loadTabContent();
+            
+            // Auto-refresh a cada 15 segundos
+            setInterval(refreshData, 15000);
+        });
+    </script>
+</body>
+</html>
+    `);
 });
 
 // Health check
@@ -576,428 +1529,24 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         pending_orders: pendingPixOrders.size,
         active_conversations: conversationState.size,
-        logs_count: systemLogs.length,
-        reports_count: deliveryReports.length,
+        total_events: eventHistory.length,
         uptime: process.uptime()
     });
 });
 
-// Interface web atualizada
-app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Sistema Webhook Evolution</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                * { margin: 0; padding: 0; box-sizing: border-box; }
-                body { 
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    min-height: 100vh;
-                    padding: 20px;
-                }
-                .container { 
-                    max-width: 1400px; 
-                    margin: 0 auto; 
-                    background: rgba(255, 255, 255, 0.95);
-                    backdrop-filter: blur(10px);
-                    border-radius: 20px; 
-                    padding: 30px; 
-                    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-                    margin-bottom: 20px;
-                }
-                h1 { 
-                    color: #2d3748; 
-                    text-align: center; 
-                    font-size: 2.5rem; 
-                    font-weight: 700; 
-                    margin-bottom: 40px;
-                    background: linear-gradient(135deg, #667eea, #764ba2);
-                    -webkit-background-clip: text;
-                    -webkit-text-fill-color: transparent;
-                    background-clip: text;
-                }
-                .section-title { 
-                    color: #4a5568; 
-                    font-size: 1.3rem; 
-                    font-weight: 600; 
-                    margin-bottom: 20px;
-                    display: flex;
-                    align-items: center;
-                    border-bottom: 2px solid #e2e8f0;
-                    padding-bottom: 10px;
-                }
-                .icon { 
-                    width: 24px; 
-                    height: 24px; 
-                    margin-right: 10px; 
-                    fill: currentColor;
-                }
-                .status-grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                    gap: 20px;
-                    margin-bottom: 30px;
-                }
-                .status-card { 
-                    background: linear-gradient(135deg, #48bb78, #38a169);
-                    color: white; 
-                    padding: 25px; 
-                    border-radius: 15px; 
-                    text-align: center;
-                    box-shadow: 0 10px 25px rgba(72, 187, 120, 0.3);
-                }
-                .status-card.warning {
-                    background: linear-gradient(135deg, #ed8936, #dd6b20);
-                    box-shadow: 0 10px 25px rgba(237, 137, 54, 0.3);
-                }
-                .status-card.info {
-                    background: linear-gradient(135deg, #4299e1, #3182ce);
-                    box-shadow: 0 10px 25px rgba(66, 153, 225, 0.3);
-                }
-                .status-label {
-                    font-size: 0.9rem;
-                    opacity: 0.9;
-                    margin-bottom: 10px;
-                    text-transform: uppercase;
-                    letter-spacing: 0.5px;
-                }
-                .status-value {
-                    font-size: 2rem;
-                    font-weight: 700;
-                }
-                .controls {
-                    display: flex;
-                    gap: 15px;
-                    flex-wrap: wrap;
-                    margin-bottom: 30px;
-                }
-                .btn { 
-                    background: linear-gradient(135deg, #667eea, #764ba2);
-                    color: white; 
-                    border: none; 
-                    padding: 12px 25px; 
-                    border-radius: 25px; 
-                    cursor: pointer; 
-                    font-weight: 600;
-                    font-size: 0.95rem;
-                    transition: all 0.3s ease;
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                }
-                .btn:hover { 
-                    transform: translateY(-2px);
-                    box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
-                }
-                .data-grid {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 30px;
-                    margin-top: 30px;
-                }
-                .data-section {
-                    background: white;
-                    border-radius: 15px;
-                    padding: 25px;
-                    border: 1px solid #e2e8f0;
-                    max-height: 400px;
-                    overflow-y: auto;
-                }
-                .data-item {
-                    padding: 15px;
-                    border-bottom: 1px solid #f7fafc;
-                    font-size: 0.9rem;
-                    line-height: 1.5;
-                }
-                .data-item:last-child {
-                    border-bottom: none;
-                }
-                .data-header {
-                    font-weight: 600;
-                    color: #2d3748;
-                    margin-bottom: 5px;
-                }
-                .data-content {
-                    color: #718096;
-                }
-                .badge {
-                    display: inline-block;
-                    padding: 4px 12px;
-                    border-radius: 12px;
-                    font-size: 0.8rem;
-                    font-weight: 600;
-                    text-transform: uppercase;
-                    letter-spacing: 0.5px;
-                    margin-left: 10px;
-                }
-                .badge-success {
-                    background: #c6f6d5;
-                    color: #22543d;
-                }
-                .badge-warning {
-                    background: #fbd38d;
-                    color: #975a16;
-                }
-                .badge-info {
-                    background: #bee3f8;
-                    color: #2c5282;
-                }
-                .empty-state {
-                    text-align: center;
-                    padding: 40px 20px;
-                    color: #718096;
-                }
-                @media (max-width: 1024px) {
-                    .data-grid {
-                        grid-template-columns: 1fr;
-                    }
-                }
-                @media (max-width: 768px) {
-                    body { padding: 10px; }
-                    .container { padding: 20px; }
-                    h1 { font-size: 2rem; }
-                    .status-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>Sistema Webhook Evolution</h1>
-                
-                <div class="status-grid">
-                    <div class="status-card">
-                        <div class="status-label">PIX Pendentes</div>
-                        <div class="status-value" id="pending-count">0</div>
-                    </div>
-                    <div class="status-card info">
-                        <div class="status-label">Conversas Ativas</div>
-                        <div class="status-value" id="conversations-count">0</div>
-                    </div>
-                    <div class="status-card warning">
-                        <div class="status-label">Envios 24h</div>
-                        <div class="status-value" id="deliveries-count">0</div>
-                    </div>
-                    <div class="status-card">
-                        <div class="status-label">Taxa Sucesso</div>
-                        <div class="status-value" id="success-rate">0%</div>
-                    </div>
-                </div>
-                
-                <div class="controls">
-                    <button class="btn" onclick="refreshStatus()">
-                        <svg class="icon" viewBox="0 0 24 24">
-                            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                        </svg>
-                        Atualizar Status
-                    </button>
-                    <button class="btn" onclick="showReports()">
-                        <svg class="icon" viewBox="0 0 24 24">
-                            <path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                        </svg>
-                        Relatórios 24h
-                    </button>
-                </div>
-                
-                <div class="data-grid">
-                    <div class="data-section">
-                        <h3 class="section-title">
-                            <svg class="icon" viewBox="0 0 24 24">
-                                <path d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1"/>
-                            </svg>
-                            PIX Pendentes
-                        </h3>
-                        <div id="pending-orders">
-                            <div class="empty-state">Carregando...</div>
-                        </div>
-                    </div>
-                    
-                    <div class="data-section">
-                        <h3 class="section-title">
-                            <svg class="icon" viewBox="0 0 24 24">
-                                <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-                            </svg>
-                            Conversas Ativas
-                        </h3>
-                        <div id="active-conversations">
-                            <div class="empty-state">Carregando...</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="container" id="reports-container" style="display: none;">
-                <h2 class="section-title">
-                    <svg class="icon" viewBox="0 0 24 24">
-                        <path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                    </svg>
-                    Relatórios de Entrega (24h)
-                </h2>
-                <div id="delivery-reports">
-                    <div class="empty-state">Carregando relatórios...</div>
-                </div>
-            </div>
-            
-            <script>
-                let currentData = null;
-                
-                function refreshStatus() {
-                    fetch('/status')
-                        .then(r => r.json())
-                        .then(data => {
-                            currentData = data;
-                            updateStatusCards(data);
-                            updatePendingOrders(data.orders);
-                            updateActiveConversations(data.conversations);
-                        })
-                        .catch(err => {
-                            console.error('Erro ao buscar status:', err);
-                        });
-                }
-                
-                function updateStatusCards(data) {
-                    document.getElementById('pending-count').textContent = data.pending_pix_orders;
-                    document.getElementById('conversations-count').textContent = data.active_conversations;
-                    document.getElementById('deliveries-count').textContent = data.delivery_reports.total_events;
-                    
-                    const successRate = data.delivery_reports.total_events > 0 ? 
-                        Math.round((data.delivery_reports.successful / data.delivery_reports.total_events) * 100) : 0;
-                    document.getElementById('success-rate').textContent = successRate + '%';
-                }
-                
-                function updatePendingOrders(orders) {
-                    const container = document.getElementById('pending-orders');
-                    
-                    if (orders.length === 0) {
-                        container.innerHTML = '<div class="empty-state">Nenhum PIX pendente</div>';
-                        return;
-                    }
-                    
-                    container.innerHTML = orders.map(order => {
-                        const minutes = Math.floor(order.remaining_time / 1000 / 60);
-                        return '<div class="data-item">' +
-                               '<div class="data-header">' + order.code + 
-                               '<span class="badge badge-warning">' + order.product + '</span>' +
-                               '<span class="badge badge-info">' + order.instance + '</span>' +
-                               '</div>' +
-                               '<div class="data-content">' +
-                               'Cliente: ' + order.first_name + '<br>' +
-                               'Telefone: ' + order.phone + '<br>' +
-                               'Tempo restante: ' + minutes + ' min' +
-                               '</div>' +
-                               '</div>';
-                    }).join('');
-                }
-                
-                function updateActiveConversations(conversations) {
-                    const container = document.getElementById('active-conversations');
-                    
-                    if (conversations.length === 0) {
-                        container.innerHTML = '<div class="empty-state">Nenhuma conversa ativa</div>';
-                        return;
-                    }
-                    
-                    container.innerHTML = conversations.map(conv => {
-                        const statusBadge = conv.waiting_for_response ? 
-                            '<span class="badge badge-warning">Aguardando</span>' :
-                            '<span class="badge badge-success">Respondido</span>';
-                            
-                        return '<div class="data-item">' +
-                               '<div class="data-header">' + conv.phone +
-                               '<span class="badge badge-info">' + conv.product + '</span>' +
-                               '<span class="badge badge-info">' + conv.instance + '</span>' +
-                               statusBadge +
-                               '</div>' +
-                               '<div class="data-content">' +
-                               'Pedido: ' + conv.order_code + '<br>' +
-                               'Respostas: ' + conv.response_count + '<br>' +
-                               'Evento: ' + conv.original_event +
-                               '</div>' +
-                               '</div>';
-                    }).join('');
-                }
-                
-                function showReports() {
-                    const container = document.getElementById('reports-container');
-                    const isVisible = container.style.display !== 'none';
-                    
-                    if (isVisible) {
-                        container.style.display = 'none';
-                        return;
-                    }
-                    
-                    container.style.display = 'block';
-                    
-                    fetch('/delivery-reports')
-                        .then(r => r.json())
-                        .then(data => {
-                            updateDeliveryReports(data.reports);
-                        })
-                        .catch(err => {
-                            console.error('Erro ao buscar relatórios:', err);
-                            document.getElementById('delivery-reports').innerHTML = 
-                                '<div class="empty-state">Erro ao carregar relatórios</div>';
-                        });
-                }
-                
-                function updateDeliveryReports(reports) {
-                    const container = document.getElementById('delivery-reports');
-                    
-                    if (reports.length === 0) {
-                        container.innerHTML = '<div class="empty-state">Nenhum relatório nas últimas 24h</div>';
-                        return;
-                    }
-                    
-                    // Agrupa por tipo de evento
-                    const grouped = reports.reduce((acc, report) => {
-                        if (!acc[report.type]) acc[report.type] = [];
-                        acc[report.type].push(report);
-                        return acc;
-                    }, {});
-                    
-                    let html = '';
-                    
-                    Object.keys(grouped).forEach(type => {
-                        const typeReports = grouped[type];
-                        const successCount = typeReports.filter(r => r.status === 'success').length;
-                        const failCount = typeReports.filter(r => r.status === 'failed').length;
-                        
-                        html += '<div class="data-item">' +
-                                '<div class="data-header">' + type.toUpperCase() +
-                                '<span class="badge badge-success">' + successCount + ' OK</span>' +
-                                '<span class="badge badge-warning">' + failCount + ' Falhas</span>' +
-                                '</div>' +
-                                '<div class="data-content">Total: ' + typeReports.length + ' eventos</div>' +
-                                '</div>';
-                    });
-                    
-                    container.innerHTML = html;
-                }
-                
-                // Atualiza automaticamente a cada 15 segundos
-                setInterval(refreshStatus, 15000);
-                
-                // Carrega dados iniciais
-                refreshStatus();
-            </script>
-        </body>
-        </html>
-    `);
-});
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    addLog('info', `🚀 Sistema Evolution Webhook v3.0 iniciado na porta ${PORT}`);
+    addLog('info', `🚀 Sistema Evolution Webhook v4.0 MELHORADO iniciado na porta ${PORT}`);
     addLog('info', `📡 Webhook Perfect: http://localhost:${PORT}/webhook/perfect`);
     addLog('info', `📱 Webhook Evolution: http://localhost:${PORT}/webhook/evolution`);
     addLog('info', `🖥️ Interface Monitor: http://localhost:${PORT}`);
+    addLog('info', `📊 API Eventos: http://localhost:${PORT}/events`);
+    addLog('info', `📈 API Estatísticas: http://localhost:${PORT}/stats`);
     addLog('info', `🎯 N8N Webhook: ${N8N_WEBHOOK_URL}`);
     addLog('info', `🤖 Evolution API: ${EVOLUTION_API_URL}`);
-    console.log(`🚀 Sistema rodando na porta ${PORT}`);
+    console.log(`\n🚀 Sistema rodando na porta ${PORT}`);
     console.log(`📡 Webhooks configurados:`);
     console.log(`   Perfect: http://localhost:${PORT}/webhook/perfect`);
     console.log(`   Evolution: http://localhost:${PORT}/webhook/evolution`);
+    console.log(`📊 Painel completo: http://localhost:${PORT}`);
 });
