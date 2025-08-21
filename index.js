@@ -1477,4 +1477,89 @@ function getHTMLContent() {
                 document.getElementById('pix-timeout').textContent = currentData.status.delivery_reports.pix_timeout;
                 
                 // Atualizar URL do N8N
-                document.getElementById('n8n-url').textContent = currentData.status
+                document.getElementById('n8n-url').textContent = currentData.status.n8n_webhook_url;
+                
+                // Recarregar conteúdo da aba atual
+                loadTabContent();
+            } catch (error) {
+                console.error('Erro ao atualizar dados:', error);
+            }
+        }
+        
+        // Exportar dados
+        function exportData() {
+            const data = {
+                timestamp: new Date().toISOString(),
+                brazil_time: new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }),
+                status: currentData.status,
+                events: currentData.events,
+                config: {
+                    n8n_webhook_url: currentData.status ? currentData.status.n8n_webhook_url : 'N/A',
+                    data_retention: '24 hours',
+                    pix_timeout: '7 minutes'
+                }
+            };
+            
+            const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'relatorio_cerebro_' + new Date().toISOString().split('T')[0] + '.json';
+            a.click();
+        }
+        
+        // Inicialização
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshData();
+            loadTabContent();
+            
+            // Auto-refresh a cada 15 segundos
+            setInterval(refreshData, 15000);
+        });
+    </script>
+</body>
+</html>`;
+}
+
+// Health check
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'online',
+        timestamp: new Date().toISOString(),
+        brazil_time: getBrazilTime(),
+        pending_orders: pendingPixOrders.size,
+        active_conversations: conversationState.size,
+        total_events: eventHistory.length,
+        uptime: process.uptime(),
+        config: {
+            n8n_webhook_url: N8N_WEBHOOK_URL,
+            data_retention: '24 hours',
+            pix_timeout: '7 minutes'
+        }
+    });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    addLog('info', `🧠 CÉREBRO DE ATENDIMENTO v2.0 iniciado na porta ${PORT}`);
+    addLog('info', `📡 Webhook Perfect: http://localhost:${PORT}/webhook/perfect`);
+    addLog('info', `📱 Webhook Evolution: http://localhost:${PORT}/webhook/evolution`);
+    addLog('info', `🖥️ Painel de Controle: http://localhost:${PORT}`);
+    addLog('info', `📊 API Eventos: http://localhost:${PORT}/events`);
+    addLog('info', `📈 API Estatísticas: http://localhost:${PORT}/stats`);
+    addLog('info', `🎯 N8N Webhook: ${N8N_WEBHOOK_URL}`);
+    addLog('info', `🤖 Evolution API: ${EVOLUTION_API_URL}`);
+    addLog('info', `⏰ Timezone: America/Sao_Paulo (Horário de Brasília)`);
+    addLog('info', `🗑️ Retenção de dados: 24 horas`);
+    addLog('info', `⏱️ Timeout PIX: 7 minutos`);
+    
+    console.log(`\n🧠 CÉREBRO DE ATENDIMENTO ATIVO`);
+    console.log(`================================`);
+    console.log(`📡 Webhooks configurados:`);
+    console.log(`   Perfect Pay: http://localhost:${PORT}/webhook/perfect`);
+    console.log(`   Evolution: http://localhost:${PORT}/webhook/evolution`);
+    console.log(`🎯 N8N: ${N8N_WEBHOOK_URL}`);
+    console.log(`📊 Painel: http://localhost:${PORT}`);
+    console.log(`⏰ Horário: ${getBrazilTime()}`);
+    console.log(`================================\n`);
+});
