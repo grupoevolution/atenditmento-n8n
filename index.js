@@ -243,7 +243,7 @@ app.post('/webhook/perfect', async (req, res) => {
                     original_event: 'aprovada',
                     response_count: 0,
                     last_system_message: null,
-                    waiting_for_response: false,
+                    waiting_for_response: true, // SEMPRE ESPERA RESPOSTA APÓS APROVADA
                     client_name: fullName,
                     createdAt: new Date()
                 });
@@ -251,6 +251,7 @@ app.post('/webhook/perfect', async (req, res) => {
                 const state = conversationState.get(phoneNumber);
                 state.original_event = 'aprovada';
                 state.instance = instance;
+                state.waiting_for_response = true; // MARCA COMO ESPERANDO RESPOSTA
             }
             
             // Prepara dados para N8N
@@ -315,7 +316,7 @@ app.post('/webhook/perfect', async (req, res) => {
                 original_event: 'pix',
                 response_count: 0,
                 last_system_message: null,
-                waiting_for_response: false,
+                waiting_for_response: true, // SEMPRE ESPERA RESPOSTA APÓS PIX
                 client_name: fullName,
                 createdAt: new Date()
             });
@@ -436,20 +437,25 @@ app.post('/webhook/evolution', async (req, res) => {
         const remoteJid = messageData.key.remoteJid;
         const fromMe = messageData.key.fromMe;
         const messageContent = messageData.message?.conversation || '';
-        const instanceId = messageData.instanceId;
+        
+        // CORREÇÃO: Usar apikey ao invés de instanceId para identificar a instância
+        const apiKey = data.apikey; // Este é o ID real da instância
+        const instanceName = data.instance; // Nome da instância já vem no payload
         
         // Logs detalhados dos campos extraídos
         console.log('📱 Remote JID:', remoteJid);
         console.log('👤 From Me:', fromMe, '(tipo:', typeof fromMe, ')');
         console.log('💬 Message Content:', messageContent);
-        console.log('🏷️ Instance ID:', instanceId);
+        console.log('🏷️ Instance Name:', instanceName);
+        console.log('🔑 API Key:', apiKey);
         
         const clientNumber = remoteJid.replace('@s.whatsapp.net', '');
         
-        const instance = INSTANCES.find(i => i.id === instanceId);
-        const instanceName = instance ? instance.name : 'UNKNOWN';
+        // Verifica se a instância é conhecida
+        const knownInstance = INSTANCES.find(i => i.id === apiKey || i.name === instanceName);
+        const finalInstanceName = knownInstance ? knownInstance.name : instanceName || 'UNKNOWN';
         
-        addLog('evolution_webhook', `Evolution: ${clientNumber} | FromMe: ${fromMe} | Instância: ${instanceName}`);
+        addLog('evolution_webhook', `Evolution: ${clientNumber} | FromMe: ${fromMe} | Instância: ${finalInstanceName}`);
         
         // Log do estado da conversa
         console.log('🔍 Verificando conversationState para:', clientNumber);
@@ -458,8 +464,25 @@ app.post('/webhook/evolution', async (req, res) => {
         if (conversationState.size > 0) {
             console.log('📋 Números com conversa ativa:');
             for (const [phone, state] of conversationState.entries()) {
-                console.log(`  - ${phone}: ${state.product} | ${state.original_event}`);
+                console.log(`  - ${phone}: ${state.product} | ${state.original_event} | Criado: ${state.createdAt}`);
             }
+        }
+        
+        // PARA TESTES: Se não existe estado, criar um temporário (REMOVER EM PRODUÇÃO)
+        if (!conversationState.has(clientNumber) && messageContent.toLowerCase().includes('teste')) {
+            console.log('🧪 MODO TESTE: Criando estado temporário para testar resposta');
+            conversationState.set(clientNumber, {
+                order_code: 'TESTE-' + Date.now(),
+                product: 'TESTE',
+                instance: finalInstanceName,
+                original_event: 'teste',
+                response_count: 0,
+                last_system_message: new Date(),
+                waiting_for_response: true, // Marca como esperando resposta
+                client_name: messageData.pushName || 'Cliente Teste',
+                createdAt: new Date()
+            });
+            addLog('info', `🧪 Estado de teste criado para ${clientNumber}`);
         }
         
         // Se não existe estado de conversa, ignora mensagem
@@ -470,13 +493,13 @@ app.post('/webhook/evolution', async (req, res) => {
         }
         
         const clientState = conversationState.get(clientNumber);
-        console.log('✅ Estado encontrado:', clientState);
+        console.log('✅ Estado encontrado:', JSON.stringify(clientState, null, 2));
         
         if (fromMe) {
             // MENSAGEM ENVIADA PELO SISTEMA
             clientState.last_system_message = new Date();
             clientState.waiting_for_response = true;
-            addLog('info', `📤 Sistema enviou mensagem para ${clientNumber} via ${instanceName}`);
+            addLog('info', `📤 Sistema enviou mensagem para ${clientNumber} via ${finalInstanceName}`);
             
             // Adiciona ao histórico local
             addEventToHistory('mensagem_enviada', 'success', {
@@ -484,7 +507,7 @@ app.post('/webhook/evolution', async (req, res) => {
                 clientPhone: clientNumber,
                 orderCode: clientState.order_code,
                 product: clientState.product,
-                instance: instanceName,
+                instance: finalInstanceName,
                 responseContent: messageContent.substring(0, 100)
             });
             
@@ -494,7 +517,8 @@ app.post('/webhook/evolution', async (req, res) => {
             console.log('⏳ Waiting for response:', clientState.waiting_for_response);
             console.log('🔢 Response count:', clientState.response_count);
             
-            if (clientState.waiting_for_response && clientState.response_count === 0) {
+            // SIMPLIFICADO: Se é a primeira resposta, envia para N8N
+            if (clientState.response_count === 0) {
                 // APENAS A PRIMEIRA RESPOSTA
                 clientState.response_count = 1;
                 clientState.waiting_for_response = false;
@@ -509,7 +533,7 @@ app.post('/webhook/evolution', async (req, res) => {
                     evento_origem: clientState.original_event,
                     cliente: {
                         telefone: clientNumber,
-                        nome: clientState.client_name
+                        nome: clientState.client_name || messageData.pushName || 'Cliente'
                     },
                     resposta: {
                         numero: 1,
@@ -527,6 +551,7 @@ app.post('/webhook/evolution', async (req, res) => {
                 
                 // ENVIA PARA N8N
                 const sendResult = await sendToN8N(eventData, 'resposta_01');
+                console.log('📤 Resultado do envio para N8N:', sendResult);
                 
                 // Adiciona ao histórico
                 addEventToHistory('resposta_cliente', sendResult.success ? 'success' : 'failed', {
@@ -562,7 +587,7 @@ app.post('/webhook/evolution', async (req, res) => {
             success: true, 
             message: 'Webhook Evolution processado',
             client_number: clientNumber,
-            instance: instanceName,
+            instance: finalInstanceName,
             from_me: fromMe
         });
         
