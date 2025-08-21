@@ -588,6 +588,9 @@ app.get('/status', (req, res) => {
         responses: deliveryReports.filter(r => r.type.startsWith('resposta_')).length
     };
     
+    // Adiciona logs limitados ao retorno
+    const recentLogs = systemLogs.slice(-100); // Últimos 100 logs
+    
     res.json({
         system_status: 'online',
         timestamp: new Date().toISOString(),
@@ -599,6 +602,7 @@ app.get('/status', (req, res) => {
         conversations: conversationList,
         delivery_reports: reportStats,
         system_stats: systemStats,
+        logs_last_hour: recentLogs,
         evolution_api_url: EVOLUTION_API_URL,
         n8n_webhook_url: N8N_WEBHOOK_URL
     });
@@ -663,15 +667,20 @@ app.get('/stats', (req, res) => {
     });
 });
 
-// Interface HTML melhorada
+// Servir arquivo HTML separadamente
 app.get('/', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
+    res.send(getHTMLContent());
+});
+
+// Função para gerar o HTML (separada para evitar problemas de sintaxe)
+function getHTMLContent() {
+    return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <title>Sistema Webhook Evolution - Painel Completo</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
@@ -934,9 +943,8 @@ app.get('/', (req, res) => {
             color: var(--gray);
         }
         
-        .empty-state svg {
-            width: 80px;
-            height: 80px;
+        .empty-state i {
+            font-size: 4rem;
             margin-bottom: 20px;
             opacity: 0.3;
         }
@@ -1013,29 +1021,29 @@ app.get('/', (req, res) => {
 <body>
     <div class="container">
         <div class="header">
-            <h1>Sistema Webhook Evolution</h1>
+            <h1><i class="fas fa-chart-line"></i> Sistema Webhook Evolution</h1>
             
             <div class="stats-grid" id="stats-grid">
                 <div class="stat-card success">
-                    <div class="stat-label">PIX Pendentes</div>
+                    <div class="stat-label"><i class="fas fa-clock"></i> PIX Pendentes</div>
                     <div class="stat-value" id="pending-pix">0</div>
                     <div class="stat-change" id="pending-change"></div>
                 </div>
                 
                 <div class="stat-card info">
-                    <div class="stat-label">Conversas Ativas</div>
+                    <div class="stat-label"><i class="fas fa-comments"></i> Conversas Ativas</div>
                     <div class="stat-value" id="active-conversations">0</div>
                     <div class="stat-change" id="conversations-change"></div>
                 </div>
                 
                 <div class="stat-card warning">
-                    <div class="stat-label">Eventos Hoje</div>
+                    <div class="stat-label"><i class="fas fa-calendar-day"></i> Eventos Hoje</div>
                     <div class="stat-value" id="events-today">0</div>
                     <div class="stat-change" id="events-change"></div>
                 </div>
                 
                 <div class="stat-card success">
-                    <div class="stat-label">Taxa de Sucesso</div>
+                    <div class="stat-label"><i class="fas fa-percentage"></i> Taxa de Sucesso</div>
                     <div class="stat-value" id="success-rate">0%</div>
                     <div class="stat-change" id="rate-change"></div>
                 </div>
@@ -1043,33 +1051,33 @@ app.get('/', (req, res) => {
             
             <div class="controls">
                 <button class="btn" onclick="refreshData()">
-                    🔄 Atualizar Dados
+                    <i class="fas fa-sync-alt"></i> Atualizar Dados
                 </button>
                 <button class="btn btn-secondary" onclick="exportData()">
-                    📊 Exportar Relatório
+                    <i class="fas fa-download"></i> Exportar Relatório
                 </button>
                 <button class="btn btn-success" onclick="clearFilters()">
-                    🧹 Limpar Filtros
+                    <i class="fas fa-broom"></i> Limpar Filtros
                 </button>
             </div>
         </div>
         
         <div class="content-panel">
             <div class="tabs">
-                <button class="tab active" onclick="switchTab('events')">
-                    📋 Histórico de Eventos
+                <button class="tab active" onclick="switchTab(event, 'events')">
+                    <i class="fas fa-list"></i> Histórico de Eventos
                 </button>
-                <button class="tab" onclick="switchTab('pending')">
-                    ⏳ PIX Pendentes
+                <button class="tab" onclick="switchTab(event, 'pending')">
+                    <i class="fas fa-hourglass-half"></i> PIX Pendentes
                 </button>
-                <button class="tab" onclick="switchTab('conversations')">
-                    💬 Conversas Ativas
+                <button class="tab" onclick="switchTab(event, 'conversations')">
+                    <i class="fas fa-comments"></i> Conversas Ativas
                 </button>
-                <button class="tab" onclick="switchTab('logs')">
-                    📝 Logs do Sistema
+                <button class="tab" onclick="switchTab(event, 'logs')">
+                    <i class="fas fa-file-alt"></i> Logs do Sistema
                 </button>
-                <button class="tab" onclick="switchTab('stats')">
-                    📈 Estatísticas
+                <button class="tab" onclick="switchTab(event, 'stats')">
+                    <i class="fas fa-chart-bar"></i> Estatísticas
                 </button>
             </div>
             
@@ -1088,7 +1096,7 @@ app.get('/', (req, res) => {
         };
         
         // Função para alternar abas
-        function switchTab(tab) {
+        function switchTab(event, tab) {
             currentTab = tab;
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             event.target.classList.add('active');
@@ -1128,83 +1136,53 @@ app.get('/', (req, res) => {
                 const content = document.getElementById('tab-content');
                 
                 if (data.events.length === 0) {
-                    content.innerHTML = `
-                        <div class="empty-state">
-                            <svg viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/>
-                                <path fill-rule="evenodd" d="M4 5a2 2 0 012-2 1 1 0 000 2H6a2 2 0 00-2 2v6h16V7a2 2 0 00-2-2h-.01a1 1 0 100-2H18a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 011-1h.01a1 1 0 110 2H8a1 1 0 01-1-1zm7-1a1 1 0 100 2h.01a1 1 0 100-2H14zm1 7a1 1 0 011-1h.01a1 1 0 110 2H16a1 1 0 01-1-1zm-7-1a1 1 0 100 2h.01a1 1 0 100-2H8z"/>
-                            </svg>
-                            <h3>Nenhum evento registrado</h3>
-                            <p>Os eventos aparecerão aqui quando ocorrerem</p>
-                        </div>
-                    `;
+                    content.innerHTML = '<div class="empty-state"><i class="fas fa-inbox"></i><h3>Nenhum evento registrado</h3><p>Os eventos aparecerão aqui quando ocorrerem</p></div>';
                     return;
                 }
                 
-                content.innerHTML = `
-                    <div class="filters">
-                        <div class="filter-group">
-                            <label class="filter-label">Tipo de Evento</label>
-                            <select class="filter-select" id="filter-type" onchange="filterEvents()">
-                                <option value="">Todos</option>
-                                <option value="pix_gerado">PIX Gerado</option>
-                                <option value="venda_aprovada">Venda Aprovada</option>
-                                <option value="pix_timeout">PIX Timeout</option>
-                                <option value="resposta_cliente">Resposta Cliente</option>
-                                <option value="mensagem_enviada">Mensagem Enviada</option>
-                            </select>
-                        </div>
-                        
-                        <div class="filter-group">
-                            <label class="filter-label">Status</label>
-                            <select class="filter-select" id="filter-status" onchange="filterEvents()">
-                                <option value="">Todos</option>
-                                <option value="success">Sucesso</option>
-                                <option value="failed">Falha</option>
-                            </select>
-                        </div>
-                        
-                        <div class="filter-group">
-                            <label class="filter-label">Buscar</label>
-                            <input type="text" class="filter-input" id="filter-search" 
-                                   placeholder="Nome, telefone, pedido..." onkeyup="filterEvents()">
-                        </div>
-                    </div>
-                    
-                    <div class="table-container">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Data/Hora</th>
-                                    <th>Tipo</th>
-                                    <th>Status</th>
-                                    <th>Cliente</th>
-                                    <th>Telefone</th>
-                                    <th>Pedido</th>
-                                    <th>Produto</th>
-                                    <th>Instância</th>
-                                    <th>Detalhes</th>
-                                </tr>
-                            </thead>
-                            <tbody id="events-tbody">
-                                ${data.events.map(event => `
-                                    <tr>
-                                        <td>${event.date} ${event.time}</td>
-                                        <td><span class="badge badge-info">${formatEventType(event.type)}</span></td>
-                                        <td><span class="badge badge-${event.status === 'success' ? 'success' : 'danger'}">${event.status}</span></td>
-                                        <td>${event.clientName}</td>
-                                        <td>${event.clientPhone}</td>
-                                        <td>${event.orderCode}</td>
-                                        <td><span class="badge badge-warning">${event.product}</span></td>
-                                        <td>${event.instance}</td>
-                                        <td>${getEventDetails(event)}</td>
-                                    </tr>
-                                `).join('')}
-                            </tbody>
-                        </table>
-                    </div>
-                `;
+                let html = '<div class="filters">';
+                html += '<div class="filter-group"><label class="filter-label">Tipo de Evento</label>';
+                html += '<select class="filter-select" id="filter-type" onchange="filterEvents()">';
+                html += '<option value="">Todos</option>';
+                html += '<option value="pix_gerado">PIX Gerado</option>';
+                html += '<option value="venda_aprovada">Venda Aprovada</option>';
+                html += '<option value="pix_timeout">PIX Timeout</option>';
+                html += '<option value="resposta_cliente">Resposta Cliente</option>';
+                html += '<option value="mensagem_enviada">Mensagem Enviada</option>';
+                html += '</select></div>';
                 
+                html += '<div class="filter-group"><label class="filter-label">Status</label>';
+                html += '<select class="filter-select" id="filter-status" onchange="filterEvents()">';
+                html += '<option value="">Todos</option>';
+                html += '<option value="success">Sucesso</option>';
+                html += '<option value="failed">Falha</option>';
+                html += '</select></div>';
+                
+                html += '<div class="filter-group"><label class="filter-label">Buscar</label>';
+                html += '<input type="text" class="filter-input" id="filter-search" placeholder="Nome, telefone, pedido..." onkeyup="filterEvents()">';
+                html += '</div></div>';
+                
+                html += '<div class="table-container"><table><thead><tr>';
+                html += '<th>Data/Hora</th><th>Tipo</th><th>Status</th><th>Cliente</th>';
+                html += '<th>Telefone</th><th>Pedido</th><th>Produto</th><th>Instância</th><th>Detalhes</th>';
+                html += '</tr></thead><tbody id="events-tbody">';
+                
+                data.events.forEach(event => {
+                    html += '<tr>';
+                    html += '<td>' + event.date + ' ' + event.time + '</td>';
+                    html += '<td><span class="badge badge-info">' + formatEventType(event.type) + '</span></td>';
+                    html += '<td><span class="badge badge-' + (event.status === 'success' ? 'success' : 'danger') + '">' + event.status + '</span></td>';
+                    html += '<td>' + event.clientName + '</td>';
+                    html += '<td>' + event.clientPhone + '</td>';
+                    html += '<td>' + event.orderCode + '</td>';
+                    html += '<td><span class="badge badge-warning">' + event.product + '</span></td>';
+                    html += '<td>' + event.instance + '</td>';
+                    html += '<td>' + getEventDetails(event) + '</td>';
+                    html += '</tr>';
+                });
+                
+                html += '</tbody></table></div>';
+                content.innerHTML = html;
                 currentData.events = data.events;
             } catch (error) {
                 console.error('Erro ao carregar eventos:', error);
@@ -1216,54 +1194,32 @@ app.get('/', (req, res) => {
             const content = document.getElementById('tab-content');
             
             if (!currentData.status || currentData.status.orders.length === 0) {
-                content.innerHTML = `
-                    <div class="empty-state">
-                        <svg viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                        </svg>
-                        <h3>Nenhum PIX pendente</h3>
-                        <p>Os PIX pendentes aparecerão aqui</p>
-                    </div>
-                `;
+                content.innerHTML = '<div class="empty-state"><i class="fas fa-clock"></i><h3>Nenhum PIX pendente</h3><p>Os PIX pendentes aparecerão aqui</p></div>';
                 return;
             }
             
-            content.innerHTML = `
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Código</th>
-                                <th>Cliente</th>
-                                <th>Telefone</th>
-                                <th>Produto</th>
-                                <th>Valor</th>
-                                <th>Instância</th>
-                                <th>Tempo Restante</th>
-                                <th>Criado em</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${currentData.status.orders.map(order => {
-                                const minutes = Math.floor(order.remaining_time / 1000 / 60);
-                                const seconds = Math.floor((order.remaining_time / 1000) % 60);
-                                return `
-                                    <tr>
-                                        <td><strong>${order.code}</strong></td>
-                                        <td>${order.full_name}</td>
-                                        <td>${order.phone}</td>
-                                        <td><span class="badge badge-warning">${order.product}</span></td>
-                                        <td>R$ ${order.amount.toFixed(2)}</td>
-                                        <td><span class="badge badge-info">${order.instance}</span></td>
-                                        <td><span class="badge badge-${minutes < 2 ? 'danger' : 'warning'}">${minutes}:${seconds.toString().padStart(2, '0')}</span></td>
-                                        <td>${new Date(order.created_at).toLocaleString('pt-BR')}</td>
-                                    </tr>
-                                `;
-                            }).join('')}
-                        </tbody>
-                    </table>
-                </div>
-            `;
+            let html = '<div class="table-container"><table><thead><tr>';
+            html += '<th>Código</th><th>Cliente</th><th>Telefone</th><th>Produto</th>';
+            html += '<th>Valor</th><th>Instância</th><th>Tempo Restante</th><th>Criado em</th>';
+            html += '</tr></thead><tbody>';
+            
+            currentData.status.orders.forEach(order => {
+                const minutes = Math.floor(order.remaining_time / 1000 / 60);
+                const seconds = Math.floor((order.remaining_time / 1000) % 60);
+                html += '<tr>';
+                html += '<td><strong>' + order.code + '</strong></td>';
+                html += '<td>' + order.full_name + '</td>';
+                html += '<td>' + order.phone + '</td>';
+                html += '<td><span class="badge badge-warning">' + order.product + '</span></td>';
+                html += '<td>R$ ' + order.amount.toFixed(2) + '</td>';
+                html += '<td><span class="badge badge-info">' + order.instance + '</span></td>';
+                html += '<td><span class="badge badge-' + (minutes < 2 ? 'danger' : 'warning') + '">' + minutes + ':' + seconds.toString().padStart(2, '0') + '</span></td>';
+                html += '<td>' + new Date(order.created_at).toLocaleString('pt-BR') + '</td>';
+                html += '</tr>';
+            });
+            
+            html += '</tbody></table></div>';
+            content.innerHTML = html;
         }
         
         // Aba de Conversas Ativas
@@ -1271,83 +1227,47 @@ app.get('/', (req, res) => {
             const content = document.getElementById('tab-content');
             
             if (!currentData.status || currentData.status.conversations.length === 0) {
-                content.innerHTML = `
-                    <div class="empty-state">
-                        <svg viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-                        </svg>
-                        <h3>Nenhuma conversa ativa</h3>
-                        <p>As conversas ativas aparecerão aqui</p>
-                    </div>
-                `;
+                content.innerHTML = '<div class="empty-state"><i class="fas fa-comments"></i><h3>Nenhuma conversa ativa</h3><p>As conversas ativas aparecerão aqui</p></div>';
                 return;
             }
             
-            content.innerHTML = `
-                <div>
-                    ${currentData.status.conversations.map(conv => `
-                        <div class="conversation-item">
-                            <div class="conversation-header">
-                                <strong>${conv.client_name || 'Cliente'} - ${conv.phone}</strong>
-                                <div>
-                                    <span class="badge badge-${conv.waiting_for_response ? 'warning' : 'success'}">
-                                        ${conv.waiting_for_response ? 'Aguardando Resposta' : 'Respondido'}
-                                    </span>
-                                </div>
-                            </div>
-                            <div class="conversation-details">
-                                <div class="detail-item">
-                                    <span class="detail-label">Pedido</span>
-                                    <span class="detail-value">${conv.order_code}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <span class="detail-label">Produto</span>
-                                    <span class="detail-value">${conv.product}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <span class="detail-label">Instância</span>
-                                    <span class="detail-value">${conv.instance}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <span class="detail-label">Respostas</span>
-                                    <span class="detail-value">${conv.response_count}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <span class="detail-label">Evento Original</span>
-                                    <span class="detail-value">${conv.original_event}</span>
-                                </div>
-                            </div>
-                        </div>
-                    `).join('')}
-                </div>
-            `;
+            let html = '<div>';
+            currentData.status.conversations.forEach(conv => {
+                html += '<div class="conversation-item">';
+                html += '<div class="conversation-header">';
+                html += '<strong>' + (conv.client_name || 'Cliente') + ' - ' + conv.phone + '</strong>';
+                html += '<div><span class="badge badge-' + (conv.waiting_for_response ? 'warning' : 'success') + '">';
+                html += (conv.waiting_for_response ? 'Aguardando Resposta' : 'Respondido') + '</span></div>';
+                html += '</div>';
+                html += '<div class="conversation-details">';
+                html += '<div class="detail-item"><span class="detail-label">Pedido</span><span class="detail-value">' + conv.order_code + '</span></div>';
+                html += '<div class="detail-item"><span class="detail-label">Produto</span><span class="detail-value">' + conv.product + '</span></div>';
+                html += '<div class="detail-item"><span class="detail-label">Instância</span><span class="detail-value">' + conv.instance + '</span></div>';
+                html += '<div class="detail-item"><span class="detail-label">Respostas</span><span class="detail-value">' + conv.response_count + '</span></div>';
+                html += '<div class="detail-item"><span class="detail-label">Evento Original</span><span class="detail-value">' + conv.original_event + '</span></div>';
+                html += '</div></div>';
+            });
+            html += '</div>';
+            content.innerHTML = html;
         }
         
         // Aba de Logs
         async function loadLogsTab() {
             const content = document.getElementById('tab-content');
-            content.innerHTML = `
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Horário</th>
-                                <th>Tipo</th>
-                                <th>Mensagem</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${currentData.status ? currentData.status.logs_last_hour?.slice(0, 100).map(log => `
-                                <tr>
-                                    <td>${new Date(log.timestamp).toLocaleTimeString('pt-BR')}</td>
-                                    <td><span class="badge badge-${getLogBadgeClass(log.type)}">${log.type}</span></td>
-                                    <td>${log.message}</td>
-                                </tr>
-                            `).join('') : ''}
-                        </tbody>
-                    </table>
-                </div>
-            `;
+            let html = '<div class="table-container"><table><thead><tr><th>Horário</th><th>Tipo</th><th>Mensagem</th></tr></thead><tbody>';
+            
+            if (currentData.status && currentData.status.logs_last_hour) {
+                currentData.status.logs_last_hour.slice(0, 100).forEach(log => {
+                    html += '<tr>';
+                    html += '<td>' + new Date(log.timestamp).toLocaleTimeString('pt-BR') + '</td>';
+                    html += '<td><span class="badge badge-' + getLogBadgeClass(log.type) + '">' + log.type + '</span></td>';
+                    html += '<td>' + log.message + '</td>';
+                    html += '</tr>';
+                });
+            }
+            
+            html += '</tbody></table></div>';
+            content.innerHTML = html;
         }
         
         // Aba de Estatísticas
@@ -1357,33 +1277,25 @@ app.get('/', (req, res) => {
                 const stats = await response.json();
                 
                 const content = document.getElementById('tab-content');
-                content.innerHTML = `
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-label">Status do Sistema</div>
-                            <div class="stat-value">Online</div>
-                            <div class="stat-change">Uptime: ${stats.system.uptime}</div>
-                        </div>
-                        
-                        <div class="stat-card success">
-                            <div class="stat-label">Taxa de Sucesso</div>
-                            <div class="stat-value">${stats.events.successRate}</div>
-                            <div class="stat-change">${stats.events.successful} de ${stats.events.total} eventos</div>
-                        </div>
-                        
-                        <div class="stat-card info">
-                            <div class="stat-label">Eventos (24h)</div>
-                            <div class="stat-value">${stats.history.eventsLast24h}</div>
-                            <div class="stat-change">Total em 7 dias: ${stats.history.eventsLast7d}</div>
-                        </div>
-                        
-                        <div class="stat-card warning">
-                            <div class="stat-label">Ativos Agora</div>
-                            <div class="stat-value">${stats.current.pendingPix + stats.current.activeConversations}</div>
-                            <div class="stat-change">${stats.current.pendingPix} PIX, ${stats.current.activeConversations} conversas</div>
-                        </div>
-                    </div>
-                `;
+                let html = '<div class="stats-grid">';
+                html += '<div class="stat-card"><div class="stat-label">Status do Sistema</div>';
+                html += '<div class="stat-value">Online</div>';
+                html += '<div class="stat-change">Uptime: ' + stats.system.uptime + '</div></div>';
+                
+                html += '<div class="stat-card success"><div class="stat-label">Taxa de Sucesso</div>';
+                html += '<div class="stat-value">' + stats.events.successRate + '</div>';
+                html += '<div class="stat-change">' + stats.events.successful + ' de ' + stats.events.total + ' eventos</div></div>';
+                
+                html += '<div class="stat-card info"><div class="stat-label">Eventos (24h)</div>';
+                html += '<div class="stat-value">' + stats.history.eventsLast24h + '</div>';
+                html += '<div class="stat-change">Total em 7 dias: ' + stats.history.eventsLast7d + '</div></div>';
+                
+                html += '<div class="stat-card warning"><div class="stat-label">Ativos Agora</div>';
+                html += '<div class="stat-value">' + (stats.current.pendingPix + stats.current.activeConversations) + '</div>';
+                html += '<div class="stat-change">' + stats.current.pendingPix + ' PIX, ' + stats.current.activeConversations + ' conversas</div></div>';
+                html += '</div>';
+                
+                content.innerHTML = html;
             } catch (error) {
                 console.error('Erro ao carregar estatísticas:', error);
             }
@@ -1406,10 +1318,10 @@ app.get('/', (req, res) => {
                 return event.responseContent.substring(0, 50) + '...';
             }
             if (event.errorMessage) {
-                return `Erro: ${event.errorMessage}`;
+                return 'Erro: ' + event.errorMessage;
             }
             if (event.amount) {
-                return `R$ ${event.amount.toFixed(2)}`;
+                return 'R$ ' + event.amount.toFixed(2);
             }
             return '-';
         }
@@ -1446,27 +1358,29 @@ app.get('/', (req, res) => {
             }
             
             const tbody = document.getElementById('events-tbody');
-            tbody.innerHTML = filtered.map(event => `
-                <tr>
-                    <td>${event.date} ${event.time}</td>
-                    <td><span class="badge badge-info">${formatEventType(event.type)}</span></td>
-                    <td><span class="badge badge-${event.status === 'success' ? 'success' : 'danger'}">${event.status}</span></td>
-                    <td>${event.clientName}</td>
-                    <td>${event.clientPhone}</td>
-                    <td>${event.orderCode}</td>
-                    <td><span class="badge badge-warning">${event.product}</span></td>
-                    <td>${event.instance}</td>
-                    <td>${getEventDetails(event)}</td>
-                </tr>
-            `).join('');
+            let html = '';
+            filtered.forEach(event => {
+                html += '<tr>';
+                html += '<td>' + event.date + ' ' + event.time + '</td>';
+                html += '<td><span class="badge badge-info">' + formatEventType(event.type) + '</span></td>';
+                html += '<td><span class="badge badge-' + (event.status === 'success' ? 'success' : 'danger') + '">' + event.status + '</span></td>';
+                html += '<td>' + event.clientName + '</td>';
+                html += '<td>' + event.clientPhone + '</td>';
+                html += '<td>' + event.orderCode + '</td>';
+                html += '<td><span class="badge badge-warning">' + event.product + '</span></td>';
+                html += '<td>' + event.instance + '</td>';
+                html += '<td>' + getEventDetails(event) + '</td>';
+                html += '</tr>';
+            });
+            tbody.innerHTML = html;
         }
         
         // Limpar filtros
         function clearFilters() {
-            document.getElementById('filter-type').value = '';
-            document.getElementById('filter-status').value = '';
-            document.getElementById('filter-search').value = '';
-            filterEvents();
+            if (document.getElementById('filter-type')) document.getElementById('filter-type').value = '';
+            if (document.getElementById('filter-status')) document.getElementById('filter-status').value = '';
+            if (document.getElementById('filter-search')) document.getElementById('filter-search').value = '';
+            if (currentTab === 'events') filterEvents();
         }
         
         // Atualizar dados
@@ -1504,12 +1418,12 @@ app.get('/', (req, res) => {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `relatorio_webhook_${new Date().toISOString().split('T')[0]}.json`;
+            a.download = 'relatorio_webhook_' + new Date().toISOString().split('T')[0] + '.json';
             a.click();
         }
         
         // Inicialização
-        document.addEventListener('DOMContentLoaded', () => {
+        document.addEventListener('DOMContentLoaded', function() {
             refreshData();
             loadTabContent();
             
@@ -1518,9 +1432,8 @@ app.get('/', (req, res) => {
         });
     </script>
 </body>
-</html>
-    `);
-});
+</html>`;
+}
 
 // Health check
 app.get('/health', (req, res) => {
