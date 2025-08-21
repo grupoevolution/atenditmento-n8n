@@ -1,5 +1,5 @@
 {
-  "name": "atenditmento-n8n"
+  "name": "webhook-evolution-system",
   "version": "3.0.0",
   "description": "Sistema integrado Perfect Pay + Evolution API",
   "main": "index.js",
