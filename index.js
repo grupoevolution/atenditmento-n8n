@@ -407,111 +407,43 @@ app.post('/webhook/perfect', async (req, res) => {
     }
 });
 
-// Webhook Evolution API - VERSÃO CORRIGIDA
+// Webhook Evolution API
 app.post('/webhook/evolution', async (req, res) => {
     try {
         const data = req.body;
+        const messageData = data.data;
         
-        // Log completo para debug
-        addLog('evolution_webhook_raw', `Dados recebidos: ${JSON.stringify(data, null, 2)}`);
-        
-        // Validações mais robustas para diferentes estruturas
-        let messageData = null;
-        let instanceId = null;
-        let remoteJid = null;
-        let fromMe = null;
-        let messageContent = '';
-        
-        // Tenta extrair dados de diferentes estruturas possíveis
-        if (data.data) {
-            messageData = data.data;
-        } else if (data.message) {
-            messageData = data;
-        } else if (data.key) {
-            messageData = data;
-        } else {
-            addLog('error', `❌ Estrutura de dados não reconhecida: ${JSON.stringify(data)}`);
-            return res.status(200).json({ success: true, message: 'Estrutura de dados inválida' });
+        if (!messageData || !messageData.key) {
+            return res.status(200).json({ success: true, message: 'Dados inválidos' });
         }
         
-        // Extrai instanceId de diferentes locais possíveis
-        instanceId = messageData.instanceId || 
-                    messageData.instance || 
-                    data.instanceId || 
-                    data.instance ||
-                    messageData.instanceName ||
-                    data.instanceName;
+        const remoteJid = messageData.key.remoteJid;
+        const fromMe = messageData.key.fromMe;
+        const messageContent = messageData.message?.conversation || '';
+        const instanceId = messageData.instanceId;
         
-        // Extrai informações da mensagem
-        if (messageData.key) {
-            remoteJid = messageData.key.remoteJid;
-            fromMe = messageData.key.fromMe;
-        } else if (messageData.remoteJid) {
-            remoteJid = messageData.remoteJid;
-            fromMe = messageData.fromMe;
-        }
+        const clientNumber = remoteJid.replace('@s.whatsapp.net', '');
         
-        // Extrai conteúdo da mensagem de diferentes estruturas
-        if (messageData.message) {
-            messageContent = messageData.message.conversation || 
-                           messageData.message.extendedTextMessage?.text ||
-                           messageData.message.text ||
-                           '';
-        } else if (messageData.body) {
-            messageContent = messageData.body;
-        } else if (messageData.content) {
-            messageContent = messageData.content;
-        }
+        const instance = INSTANCES.find(i => i.id === instanceId);
+        const instanceName = instance ? instance.name : 'UNKNOWN';
         
-        // Valida se conseguiu extrair dados essenciais
-        if (!remoteJid || fromMe === null || fromMe === undefined) {
-            addLog('error', `❌ Dados essenciais ausentes - remoteJid: ${remoteJid}, fromMe: ${fromMe}`);
-            return res.status(200).json({ success: true, message: 'Dados essenciais ausentes' });
-        }
+        addLog('evolution_webhook', `Evolution: ${clientNumber} | FromMe: ${fromMe} | Instância: ${instanceName}`);
         
-        // Normaliza o número do cliente
-        const clientNumber = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
-        
-        // Encontra a instância pelo ID
-        const instance = INSTANCES.find(i => 
-            i.id === instanceId || 
-            i.name === instanceId ||
-            instanceId?.includes(i.id) ||
-            instanceId?.includes(i.name)
-        );
-        const instanceName = instance ? instance.name : (instanceId || 'UNKNOWN');
-        
-        addLog('evolution_webhook', `Evolution processando: Cliente ${clientNumber} | FromMe: ${fromMe} | Instância: ${instanceName} | Conteúdo: "${messageContent.substring(0, 50)}..."`);
-        
-        // Verifica se existe estado de conversa
+        // Se não existe estado de conversa, ignora mensagem
         if (!conversationState.has(clientNumber)) {
-            addLog('info', `❓ Cliente ${clientNumber} não encontrado no estado de conversa - criando estado temporário para debug`);
-            
-            // Para debug, vamos criar um estado temporário se não existir
-            conversationState.set(clientNumber, {
-                order_code: 'DEBUG-' + Date.now(),
-                product: 'UNKNOWN',
-                instance: instanceName,
-                original_event: 'debug',
-                response_count: 0,
-                last_system_message: null,
-                waiting_for_response: false,
-                client_name: 'Debug Cliente',
-                createdAt: new Date()
-            });
-            
-            addLog('info', `🔧 Estado temporário criado para cliente ${clientNumber} para fins de debug`);
+            addLog('info', `❓ Cliente ${clientNumber} não encontrado no estado de conversa - mensagem ignorada`);
+            return res.status(200).json({ success: true, message: 'Cliente não encontrado' });
         }
         
         const clientState = conversationState.get(clientNumber);
         
-        if (fromMe === true || fromMe === "true" || fromMe === 1) {
+        if (fromMe) {
             // MENSAGEM ENVIADA PELO SISTEMA
             clientState.last_system_message = new Date();
             clientState.waiting_for_response = true;
             addLog('info', `📤 Sistema enviou mensagem para ${clientNumber} via ${instanceName}`);
             
-            // Adiciona ao histórico
+            // Adiciona ao histórico local
             addEventToHistory('mensagem_enviada', 'success', {
                 clientName: clientState.client_name || 'Cliente',
                 clientPhone: clientNumber,
@@ -521,16 +453,14 @@ app.post('/webhook/evolution', async (req, res) => {
                 responseContent: messageContent.substring(0, 100)
             });
             
-        } else if (fromMe === false || fromMe === "false" || fromMe === 0) {
+        } else {
             // RESPOSTA DO CLIENTE
-            addLog('info', `📥 Mensagem DO CLIENTE ${clientNumber}: "${messageContent.substring(0, 50)}..." | Aguardando resposta: ${clientState.waiting_for_response} | Contagem: ${clientState.response_count}`);
-            
             if (clientState.waiting_for_response && clientState.response_count === 0) {
-                // PRIMEIRA RESPOSTA
+                // APENAS A PRIMEIRA RESPOSTA
                 clientState.response_count = 1;
                 clientState.waiting_for_response = false;
                 
-                addLog('info', `🎉 PRIMEIRA RESPOSTA CAPTURADA do cliente ${clientNumber}: "${messageContent.substring(0, 50)}..."`);
+                addLog('info', `📥 PRIMEIRA RESPOSTA do cliente ${clientNumber}: "${messageContent.substring(0, 50)}..."`);
                 
                 const eventData = {
                     event_type: 'resposta_01',
@@ -576,104 +506,26 @@ app.post('/webhook/evolution', async (req, res) => {
                     error: sendResult.error
                 });
                 
+                conversationState.set(clientNumber, clientState);
+                
             } else if (clientState.response_count > 0) {
-                // RESPOSTAS ADICIONAIS
+                // IGNORA RESPOSTAS ADICIONAIS
                 addLog('info', `📝 Resposta adicional IGNORADA do cliente ${clientNumber} (já enviou resposta_01)`);
             } else {
-                // MENSAGEM ANTES DO SISTEMA ENVIAR
-                addLog('info', `📝 Mensagem do cliente ${clientNumber} antes do sistema enviar - IGNORADA mas registrada`);
-                
-                // Para debug, vamos registrar essas mensagens também
-                addEventToHistory('mensagem_cliente_prematura', 'info', {
-                    clientName: clientState.client_name || 'Cliente',
-                    clientPhone: clientNumber,
-                    orderCode: clientState.order_code,
-                    product: clientState.product,
-                    instance: instanceName,
-                    responseContent: messageContent
-                });
+                addLog('info', `📝 Mensagem do cliente ${clientNumber} antes do sistema enviar mensagem - IGNORADA`);
             }
-        } else {
-            addLog('error', `❌ Valor fromMe inválido: ${fromMe} (tipo: ${typeof fromMe})`);
         }
-        
-        // Atualiza o estado
-        conversationState.set(clientNumber, clientState);
         
         res.status(200).json({ 
             success: true, 
-            message: 'Webhook Evolution processado com sucesso',
-            debug: {
-                client_number: clientNumber,
-                instance: instanceName,
-                from_me: fromMe,
-                from_me_type: typeof fromMe,
-                message_length: messageContent.length,
-                has_conversation_state: conversationState.has(clientNumber),
-                conversation_state: clientState,
-                raw_instance_id: instanceId
-            }
+            message: 'Webhook Evolution processado',
+            client_number: clientNumber,
+            instance: instanceName,
+            from_me: fromMe
         });
         
     } catch (error) {
-        addLog('error', `❌ ERRO Evolution webhook: ${error.message}`, { 
-            error: error.stack,
-            body: req.body 
-        });
-        res.status(500).json({ 
-            success: false, 
-            error: error.message,
-            debug: {
-                body_received: req.body
-            }
-        });
-    }
-});
-
-// Função auxiliar para testar webhook Evolution (adicione esta rota para testes)
-app.post('/test/evolution', async (req, res) => {
-    try {
-        addLog('test', `🧪 Webhook de teste recebido: ${JSON.stringify(req.body, null, 2)}`);
-        
-        // Simula uma resposta de cliente para teste
-        const testData = {
-            data: {
-                key: {
-                    remoteJid: "5575999887766@s.whatsapp.net",
-                    fromMe: false
-                },
-                message: {
-                    conversation: "Olá, recebi sua mensagem!"
-                },
-                instanceId: "1CEBB8703497-4F31-B33F-335A4233D2FE"
-            }
-        };
-        
-        // Cria estado de conversa para teste se não existir
-        const clientNumber = "5575999887766";
-        if (!conversationState.has(clientNumber)) {
-            conversationState.set(clientNumber, {
-                order_code: 'TEST-' + Date.now(),
-                product: 'FAB',
-                instance: 'GABY01',
-                original_event: 'test',
-                response_count: 0,
-                last_system_message: new Date(),
-                waiting_for_response: true,
-                client_name: 'Cliente Teste',
-                createdAt: new Date()
-            });
-        }
-        
-        // Processa com os dados de teste ou dados recebidos
-        const dataToProcess = Object.keys(req.body).length > 0 ? req.body : testData;
-        
-        // Chama o webhook normal
-        req.body = dataToProcess;
-        return app._router.handle({ ...req, url: '/webhook/evolution', method: 'POST' }, res);
-        
-    } catch (error) {
-        addLog('error', `❌ ERRO no teste Evolution: ${error.message}`);
+        addLog('error', `❌ ERRO Evolution webhook: ${error.message}`, { error: error.stack });
         res.status(500).json({ success: false, error: error.message });
     }
 });
