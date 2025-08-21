@@ -410,10 +410,26 @@ app.post('/webhook/perfect', async (req, res) => {
 // Webhook Evolution API
 app.post('/webhook/evolution', async (req, res) => {
     try {
+        // LOG COMPLETO DO PAYLOAD PARA DEBUG
+        console.log('========================================');
+        console.log('EVOLUTION WEBHOOK RECEBIDO:', getBrazilTime());
+        console.log('PAYLOAD COMPLETO:', JSON.stringify(req.body, null, 2));
+        console.log('========================================');
+        
         const data = req.body;
+        
+        // Adiciona ao log do sistema também
+        addLog('evolution_raw', `Payload Evolution recebido`, { 
+            raw_body: req.body,
+            headers: req.headers 
+        });
+        
+        // Verifica se tem a estrutura esperada
         const messageData = data.data;
         
         if (!messageData || !messageData.key) {
+            console.log('⚠️ Estrutura não esperada - messageData ou key ausente');
+            addLog('warning', `Evolution: estrutura inesperada`, { body: req.body });
             return res.status(200).json({ success: true, message: 'Dados inválidos' });
         }
         
@@ -422,6 +438,12 @@ app.post('/webhook/evolution', async (req, res) => {
         const messageContent = messageData.message?.conversation || '';
         const instanceId = messageData.instanceId;
         
+        // Logs detalhados dos campos extraídos
+        console.log('📱 Remote JID:', remoteJid);
+        console.log('👤 From Me:', fromMe, '(tipo:', typeof fromMe, ')');
+        console.log('💬 Message Content:', messageContent);
+        console.log('🏷️ Instance ID:', instanceId);
+        
         const clientNumber = remoteJid.replace('@s.whatsapp.net', '');
         
         const instance = INSTANCES.find(i => i.id === instanceId);
@@ -429,13 +451,26 @@ app.post('/webhook/evolution', async (req, res) => {
         
         addLog('evolution_webhook', `Evolution: ${clientNumber} | FromMe: ${fromMe} | Instância: ${instanceName}`);
         
+        // Log do estado da conversa
+        console.log('🔍 Verificando conversationState para:', clientNumber);
+        console.log('📊 Total de conversas ativas:', conversationState.size);
+        
+        if (conversationState.size > 0) {
+            console.log('📋 Números com conversa ativa:');
+            for (const [phone, state] of conversationState.entries()) {
+                console.log(`  - ${phone}: ${state.product} | ${state.original_event}`);
+            }
+        }
+        
         // Se não existe estado de conversa, ignora mensagem
         if (!conversationState.has(clientNumber)) {
+            console.log(`❌ Cliente ${clientNumber} NÃO está no conversationState`);
             addLog('info', `❓ Cliente ${clientNumber} não encontrado no estado de conversa - mensagem ignorada`);
             return res.status(200).json({ success: true, message: 'Cliente não encontrado' });
         }
         
         const clientState = conversationState.get(clientNumber);
+        console.log('✅ Estado encontrado:', clientState);
         
         if (fromMe) {
             // MENSAGEM ENVIADA PELO SISTEMA
@@ -455,12 +490,17 @@ app.post('/webhook/evolution', async (req, res) => {
             
         } else {
             // RESPOSTA DO CLIENTE
+            console.log('📨 Mensagem do cliente detectada');
+            console.log('⏳ Waiting for response:', clientState.waiting_for_response);
+            console.log('🔢 Response count:', clientState.response_count);
+            
             if (clientState.waiting_for_response && clientState.response_count === 0) {
                 // APENAS A PRIMEIRA RESPOSTA
                 clientState.response_count = 1;
                 clientState.waiting_for_response = false;
                 
                 addLog('info', `📥 PRIMEIRA RESPOSTA do cliente ${clientNumber}: "${messageContent.substring(0, 50)}..."`);
+                console.log('🚀 ENVIANDO RESPOSTA_01 PARA N8N');
                 
                 const eventData = {
                     event_type: 'resposta_01',
@@ -511,8 +551,10 @@ app.post('/webhook/evolution', async (req, res) => {
             } else if (clientState.response_count > 0) {
                 // IGNORA RESPOSTAS ADICIONAIS
                 addLog('info', `📝 Resposta adicional IGNORADA do cliente ${clientNumber} (já enviou resposta_01)`);
+                console.log('⚠️ Resposta adicional ignorada - já tem resposta_01');
             } else {
                 addLog('info', `📝 Mensagem do cliente ${clientNumber} antes do sistema enviar mensagem - IGNORADA`);
+                console.log('⚠️ Mensagem antes do sistema enviar - ignorada');
             }
         }
         
@@ -525,6 +567,7 @@ app.post('/webhook/evolution', async (req, res) => {
         });
         
     } catch (error) {
+        console.error('❌ ERRO NO WEBHOOK EVOLUTION:', error);
         addLog('error', `❌ ERRO Evolution webhook: ${error.message}`, { error: error.stack });
         res.status(500).json({ success: false, error: error.message });
     }
