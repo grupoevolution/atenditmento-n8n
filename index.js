@@ -54,7 +54,7 @@ app.use(express.json());
 function addEventToHistory(eventType, status, data) {
     const event = {
         id: Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-        timestamp: new Date().toISOString(),
+        timestamp: new Date().toLocaleString('sv-SE', { timeZone: 'America/Sao_Paulo' }),
         date: new Date().toLocaleDateString('pt-BR'),
         time: new Date().toLocaleTimeString('pt-BR'),
         type: eventType,
