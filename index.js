@@ -55,8 +55,8 @@ function addEventToHistory(eventType, status, data) {
     const event = {
         id: Date.now() + '_' + Math.random().toString(36).substr(2, 9),
         timestamp: new Date().toISOString(),
-        date: new Date().toLocaleDateString('pt-BR'),
-        time: new Date().toLocaleTimeString('pt-BR'),
+        date: new Date().toLocaleDateString('pt-BR'), { timeZone: 'America/Sao_Paulo' }),
+        time: new Date().toLocaleTimeString('pt-BR'), { timeZone: 'America/Sao_Paulo' }),
         type: eventType,
         status: status,
         clientName: data.clientName || 'N/A',
