@@ -408,6 +408,38 @@ app.post('/webhook/perfect', async (req, res) => {
     }
 });
 
+// Função para normalizar número de telefone (remove 9 extra de celular)
+function normalizePhoneNumber(phone) {
+    // Remove tudo que não é número
+    let cleaned = phone.replace(/\D/g, '');
+    
+    // Se tem 13 dígitos (55 + DDD + 9 + 8 dígitos), remove o 9 extra
+    if (cleaned.length === 13 && cleaned.substring(4, 5) === '9') {
+        // Remove o 9 extra após o DDD
+        cleaned = cleaned.substring(0, 4) + cleaned.substring(5);
+    }
+    
+    return cleaned;
+}
+
+// Função para verificar se números são equivalentes
+function phoneNumbersMatch(phone1, phone2) {
+    return normalizePhoneNumber(phone1) === normalizePhoneNumber(phone2);
+}
+
+// Função para encontrar estado por número (com normalização)
+function findConversationState(phoneNumber) {
+    const normalizedSearch = normalizePhoneNumber(phoneNumber);
+    
+    for (const [phone, state] of conversationState.entries()) {
+        if (normalizePhoneNumber(phone) === normalizedSearch) {
+            return { phone, state };
+        }
+    }
+    
+    return null;
+}
+
 // Webhook Evolution API
 app.post('/webhook/evolution', async (req, res) => {
     try {
@@ -468,8 +500,11 @@ app.post('/webhook/evolution', async (req, res) => {
             }
         }
         
+        // Busca estado com normalização de número
+        const conversationMatch = findConversationState(clientNumber);
+        
         // PARA TESTES: Se não existe estado, criar um temporário (REMOVER EM PRODUÇÃO)
-        if (!conversationState.has(clientNumber) && messageContent.toLowerCase().includes('teste')) {
+        if (!conversationMatch && messageContent.toLowerCase().includes('teste')) {
             console.log('🧪 MODO TESTE: Criando estado temporário para testar resposta');
             conversationState.set(clientNumber, {
                 order_code: 'TESTE-' + Date.now(),
@@ -485,15 +520,19 @@ app.post('/webhook/evolution', async (req, res) => {
             addLog('info', `🧪 Estado de teste criado para ${clientNumber}`);
         }
         
+        // Busca novamente após possível criação de teste
+        const finalMatch = conversationMatch || findConversationState(clientNumber);
+        
         // Se não existe estado de conversa, ignora mensagem
-        if (!conversationState.has(clientNumber)) {
+        if (!finalMatch) {
             console.log(`❌ Cliente ${clientNumber} NÃO está no conversationState`);
+            console.log(`   Tentou normalizado: ${normalizePhoneNumber(clientNumber)}`);
             addLog('info', `❓ Cliente ${clientNumber} não encontrado no estado de conversa - mensagem ignorada`);
             return res.status(200).json({ success: true, message: 'Cliente não encontrado' });
         }
         
-        const clientState = conversationState.get(clientNumber);
-        console.log('✅ Estado encontrado:', JSON.stringify(clientState, null, 2));
+        const { phone: matchedPhone, state: clientState } = finalMatch;
+        console.log(`✅ Estado encontrado para ${matchedPhone}:`, JSON.stringify(clientState, null, 2));
         
         if (fromMe) {
             // MENSAGEM ENVIADA PELO SISTEMA
@@ -571,7 +610,7 @@ app.post('/webhook/evolution', async (req, res) => {
                     error: sendResult.error
                 });
                 
-                conversationState.set(clientNumber, clientState);
+                conversationState.set(matchedPhone, clientState);
                 
             } else if (clientState.response_count > 0) {
                 // IGNORA RESPOSTAS ADICIONAIS
