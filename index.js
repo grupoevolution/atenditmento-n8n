@@ -3,7 +3,7 @@ const axios = require('axios');
 const app = express();
 
 // Configurações
-const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || 'https://n8n.flowzap.fun/webhook/f23c49cb-b6ed-4eea-84d8-3fe25753d9a5';
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || 'https://n8n.flowzap.fun/webhook/atendimento-n8n';
 const EVOLUTION_API_URL = 'https://evo.flowzap.fun';
 const PIX_TIMEOUT = 7 * 60 * 1000; // 7 minutos
 
