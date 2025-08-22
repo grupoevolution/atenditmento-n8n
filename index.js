@@ -408,35 +408,66 @@ app.post('/webhook/perfect', async (req, res) => {
     }
 });
 
-// Função para normalizar número de telefone (remove 9 extra de celular)
+// Função para normalizar número de telefone (padroniza formato)
 function normalizePhoneNumber(phone) {
     // Remove tudo que não é número
     let cleaned = phone.replace(/\D/g, '');
     
-    // Se tem 13 dígitos (55 + DDD + 9 + 8 dígitos), remove o 9 extra
-    if (cleaned.length === 13 && cleaned.substring(4, 5) === '9') {
-        // Remove o 9 extra após o DDD
-        cleaned = cleaned.substring(0, 4) + cleaned.substring(5);
+    // Se começa com 55 (Brasil)
+    if (cleaned.startsWith('55')) {
+        // Pega DDD (posições 2-3 ou 2-4 dependendo do caso)
+        const withoutCountry = cleaned.substring(2);
+        
+        // Se tem 11 dígitos (DDD + 9 + número)
+        if (withoutCountry.length === 11) {
+            const ddd = withoutCountry.substring(0, 2);
+            const rest = withoutCountry.substring(2);
+            
+            // Se o resto começa com 9 e tem 9 dígitos, remove o 9
+            if (rest.startsWith('9') && rest.length === 9) {
+                cleaned = '55' + ddd + rest.substring(1);
+            }
+        }
+        // Se tem 12 dígitos (DDD com 9 extra + 9 + número)
+        else if (withoutCountry.length === 12) {
+            // Caso especial: 759 ao invés de 75
+            const possibleDDD = withoutCountry.substring(0, 3);
+            if (possibleDDD.endsWith('9')) {
+                // Remove o 9 do DDD
+                const realDDD = possibleDDD.substring(0, 2);
+                const rest = withoutCountry.substring(3);
+                cleaned = '55' + realDDD + rest;
+            }
+        }
     }
     
+    console.log(`📱 Normalização: ${phone} → ${cleaned}`);
     return cleaned;
 }
 
 // Função para verificar se números são equivalentes
 function phoneNumbersMatch(phone1, phone2) {
-    return normalizePhoneNumber(phone1) === normalizePhoneNumber(phone2);
+    const norm1 = normalizePhoneNumber(phone1);
+    const norm2 = normalizePhoneNumber(phone2);
+    console.log(`📞 Comparando: ${norm1} === ${norm2} ? ${norm1 === norm2}`);
+    return norm1 === norm2;
 }
 
 // Função para encontrar estado por número (com normalização)
 function findConversationState(phoneNumber) {
     const normalizedSearch = normalizePhoneNumber(phoneNumber);
+    console.log(`🔍 Buscando estado para número normalizado: ${normalizedSearch}`);
     
     for (const [phone, state] of conversationState.entries()) {
-        if (normalizePhoneNumber(phone) === normalizedSearch) {
+        const normalizedStored = normalizePhoneNumber(phone);
+        console.log(`  Comparando com: ${phone} (normalizado: ${normalizedStored})`);
+        if (normalizedStored === normalizedSearch) {
+            console.log(`  ✅ MATCH encontrado!`);
             return { phone, state };
         }
     }
     
+    console.log(`  ❌ Nenhum match encontrado`);
     return null;
 }
 
