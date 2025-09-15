@@ -414,6 +414,269 @@ app.post('/webhook/perfect', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+// ADICIONAR ESTE CÓDIGO NO SEU index.js (após o webhook Perfect Pay)
+
+// Mapeamento dos produtos da Kirvano (apenas FAB e CS)
+const KIRVANO_PRODUCT_MAPPING = {
+    '5288799c-d8e3-48ce-a91d-587814acdee5': 'FAB',  // FAB
+    '0f393085-4960-4c71-9efe-faee8ba51d3f': 'CS',   // CS - Produto 1
+    '5c1f6390-8999-4740-b16f-51380e1097e4': 'CS'    // CS - Produto 2
+};
+
+// Webhook Kirvano
+app.post('/webhook/kirvano', async (req, res) => {
+    try {
+        console.log('========================================');
+        console.log('WEBHOOK KIRVANO RECEBIDO:', getBrazilTime());
+        console.log('PAYLOAD COMPLETO:', JSON.stringify(req.body, null, 2));
+        console.log('========================================');
+        
+        const data = req.body;
+        
+        // Verifica se é uma venda aprovada
+        if (data.event !== 'SALE_APPROVED' || data.status !== 'APPROVED') {
+            addLog('webhook_received', `Kirvano: Status não aprovado - ${data.event}/${data.status}`);
+            return res.status(200).json({ 
+                success: true, 
+                message: 'Status não processado' 
+            });
+        }
+        
+        const email = data.customer?.email;
+        const customerName = data.customer?.name || 'Cliente';
+        const phoneNumber = data.customer?.phone_number || '';
+        const saleId = data.sale_id || data.checkout_id;
+        const totalPrice = data.total_price || 0;
+        
+        if (!email || !phoneNumber) {
+            addLog('error', 'Kirvano: Dados obrigatórios faltando', { email, phoneNumber });
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Email e telefone são obrigatórios' 
+            });
+        }
+        
+        if (!data.products || !Array.isArray(data.products) || data.products.length === 0) {
+            addLog('error', 'Kirvano: Nenhum produto encontrado na venda');
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Lista de produtos é obrigatória' 
+            });
+        }
+        
+        console.log(`🛒 PROCESSANDO ${data.products.length} PRODUTO(S) DA KIRVANO:`);
+        
+        // Processar cada produto comprado
+        let processedProducts = [];
+        
+        for (const product of data.products) {
+            const offerId = product.offer_id;
+            const productName = product.offer_name || product.name || 'Produto';
+            
+            if (!offerId) {
+                console.log('⚠️ Produto sem offer_id:', product);
+                continue;
+            }
+            
+            // Mapear offer_id para produto (FAB ou CS)
+            const mappedProduct = KIRVANO_PRODUCT_MAPPING[offerId];
+            
+            if (!mappedProduct) {
+                console.log(`⚠️ Offer ID não mapeado: ${offerId}`);
+                addLog('warning', `Kirvano: Offer ID não reconhecido - ${offerId}`, { product });
+                continue;
+            }
+            
+            console.log(`✅ Produto mapeado: ${offerId} → ${mappedProduct}`);
+            
+            const firstName = getFirstName(customerName);
+            
+            // Formatar telefone (assumindo formato brasileiro)
+            const formattedPhone = phoneNumber.replace(/\D/g, ''); // Remove caracteres não numéricos
+            
+            addLog('webhook_received', `Kirvano: ${saleId} | Produto: ${mappedProduct} | Cliente: ${firstName} | Fone: ${formattedPhone}`);
+            
+            // VENDA APROVADA DA KIRVANO - MESMO FLUXO DO PERFECTPAY
+            addLog('info', `✅ VENDA APROVADA KIRVANO - ${saleId} | Produto: ${mappedProduct}`);
+            
+            // Obtém instância sticky para o cliente
+            const instance = getInstanceForClient(formattedPhone);
+            
+            // Cria/atualiza estado da conversa para aprovada
+            if (!conversationState.has(formattedPhone)) {
+                conversationState.set(formattedPhone, {
+                    order_code: saleId,
+                    product: mappedProduct,
+                    instance: instance,
+                    original_event: 'aprovada',
+                    response_count: 0,
+                    last_system_message: null,
+                    waiting_for_response: true, // SEMPRE ESPERA RESPOSTA APÓS APROVADA
+                    client_name: customerName,
+                    amount: parseFloat(totalPrice.toString().replace(/[^\d.,]/g, '').replace(',', '.')) || 0,
+                    pix_url: '', // Vazio para venda aprovada direto
+                    billet_url: '', // Vazio para venda aprovada direto
+                    createdAt: new Date()
+                });
+            } else {
+                const state = conversationState.get(formattedPhone);
+                state.original_event = 'aprovada';
+                state.instance = instance;
+                state.waiting_for_response = true; // MARCA COMO ESPERANDO RESPOSTA
+                state.amount = parseFloat(totalPrice.toString().replace(/[^\d.,]/g, '').replace(',', '.')) || 0;
+            }
+            
+            // Prepara dados para N8N (MESMO FORMATO DO PERFECTPAY)
+            const eventData = {
+                event_type: 'venda_aprovada',
+                produto: mappedProduct,
+                instancia: instance,
+                evento_origem: 'aprovada',
+                cliente: {
+                    nome: firstName,
+                    telefone: formattedPhone,
+                    nome_completo: customerName
+                },
+                pedido: {
+                    codigo: saleId,
+                    valor: parseFloat(totalPrice.toString().replace(/[^\d.,]/g, '').replace(',', '.')) || 0,
+                    plano: offerId // Usar offer_id como plano
+                },
+                timestamp: new Date().toISOString(),
+                brazil_time: getBrazilTime(),
+                dados_originais: data,
+                gateway: 'kirvano' // Identificador para distinguir da PerfectPay
+            };
+            
+            // ENVIA PARA N8N
+            const sendResult = await sendToN8N(eventData, 'venda_aprovada');
+            
+            // Adiciona ao histórico
+            addEventToHistory('venda_aprovada', sendResult.success ? 'success' : 'failed', {
+                clientName: customerName,
+                clientPhone: formattedPhone,
+                orderCode: saleId,
+                product: mappedProduct,
+                instance: instance,
+                amount: parseFloat(totalPrice.toString().replace(/[^\d.,]/g, '').replace(',', '.')) || 0,
+                errorMessage: sendResult.error
+            });
+            
+            addDeliveryReport('venda_aprovada', sendResult.success ? 'success' : 'failed', {
+                order_code: saleId,
+                product: mappedProduct,
+                instance: instance,
+                error: sendResult.error,
+                gateway: 'kirvano'
+            });
+            
+            processedProducts.push({
+                offer_id: offerId,
+                product_name: productName,
+                mapped_product: mappedProduct,
+                status: sendResult.success ? 'success' : 'failed',
+                instance: instance
+            });
+        }
+        
+        if (processedProducts.length === 0) {
+            addLog('warning', 'Kirvano: Nenhum produto foi processado com sucesso');
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Nenhum produto reconhecido foi encontrado' 
+            });
+        }
+        
+        console.log(`✅ KIRVANO PROCESSADO COM SUCESSO: ${processedProducts.length} produtos`);
+        
+        res.status(200).json({ 
+            success: true, 
+            message: 'Webhook Kirvano processado com sucesso',
+            sale_id: saleId,
+            products_processed: processedProducts.length,
+            products: processedProducts
+        });
+        
+    } catch (error) {
+        console.error('❌ ERRO NO WEBHOOK KIRVANO:', error);
+        addLog('error', `❌ ERRO Kirvano webhook: ${error.message}`, { error: error.stack });
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Endpoint de debug para testar Kirvano (opcional)
+app.post('/debug/test-kirvano', async (req, res) => {
+    const { email, phone, offer_id, product_name } = req.body;
+    
+    if (!email || !phone || !offer_id) {
+        return res.status(400).json({ 
+            error: 'Email, phone e offer_id são obrigatórios' 
+        });
+    }
+    
+    // Simular payload da Kirvano
+    const mockPayload = {
+        event: 'SALE_APPROVED',
+        status: 'APPROVED',
+        sale_id: 'TEST_KIRVANO_' + Date.now(),
+        checkout_id: 'CHK_' + Date.now(),
+        total_price: 'R$ 97,00',
+        customer: {
+            email: email,
+            name: 'Cliente Teste Kirvano',
+            phone_number: phone
+        },
+        products: [{
+            id: 'prod_test_' + Date.now(),
+            name: product_name || 'Produto Teste',
+            offer_id: offer_id,
+            offer_name: product_name || 'Produto Teste Kirvano',
+            description: 'Produto para teste do webhook Kirvano',
+            price: 'R$ 97,00'
+        }]
+    };
+    
+    console.log('\n🧪 SIMULANDO WEBHOOK KIRVANO:');
+    console.log('📧 Email:', email);
+    console.log('📱 Phone:', phone);
+    console.log('🏷️ Offer ID:', offer_id);
+    
+    try {
+        // Simular o processamento interno
+        const response = await fetch(`http://localhost:${PORT}/webhook/kirvano`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(mockPayload)
+        });
+        
+        const result = await response.json();
+        
+        res.json({
+            success: true,
+            message: 'Teste Kirvano executado',
+            webhook_response: result,
+            mock_payload: mockPayload,
+            timestamp: getBrazilTime()
+        });
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: 'Erro ao simular webhook Kirvano',
+            details: error.message,
+            mock_payload: mockPayload
+        });
+    }
+});
+
+console.log('🔄 Webhook Kirvano configurado em: /webhook/kirvano');
+console.log('🧪 Teste disponível em: POST /debug/test-kirvano');
+console.log('📋 Produtos Kirvano mapeados:');
+console.log('   FAB: 5288799c-d8e3-48ce-a91d-587814acdee5');
+console.log('   CS:  0f393085-4960-4c71-9efe-faee8ba51d3f');
+console.log('   CS:  5c1f6390-8999-4740-b16f-51380e1097e4');
 
 // Função para normalizar número de telefone (padroniza formato)
 function normalizePhoneNumber(phone) {
