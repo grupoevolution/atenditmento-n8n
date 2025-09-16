@@ -338,6 +338,369 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// ============ INTERFACE WEB (PAINEL) ============
+app.get('/', (req, res) => {
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <title>Cérebro Kirvano - Painel de Controle</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container { 
+            max-width: 1400px; 
+            margin: 0 auto; 
+        }
+        
+        .header {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        h1 { 
+            color: #333; 
+            font-size: 2.5rem; 
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .subtitle {
+            color: #666;
+            font-size: 1rem;
+            margin-bottom: 20px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card { 
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.08);
+        }
+        
+        .stat-card.warning { border-left: 4px solid #ed8936; }
+        .stat-card.info { border-left: 4px solid #4299e1; }
+        .stat-card.success { border-left: 4px solid #48bb78; }
+        
+        .stat-label {
+            font-size: 0.9rem;
+            color: #718096;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: #2d3748;
+        }
+        
+        .content-panel {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #f7fafc;
+        }
+        
+        .tab {
+            padding: 12px 24px;
+            background: none;
+            border: none;
+            color: #718096;
+            font-weight: 600;
+            cursor: pointer;
+            position: relative;
+        }
+        
+        .tab.active {
+            color: #667eea;
+        }
+        
+        .tab.active::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: #667eea;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        th {
+            background: #f7fafc;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #2d3748;
+            font-size: 0.9rem;
+        }
+        
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #f7fafc;
+            font-size: 0.95rem;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        
+        .badge-success { background: #c6f6d5; color: #22543d; }
+        .badge-warning { background: #fbd38d; color: #975a16; }
+        .badge-info { background: #bee3f8; color: #2c5282; }
+        
+        .btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-right: 10px;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #718096;
+        }
+        
+        .config-info {
+            background: #f7fafc;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        
+        .config-item:last-child {
+            border-bottom: none;
+        }
+        
+        .config-label {
+            color: #718096;
+            font-weight: 600;
+        }
+        
+        .config-value {
+            color: #2d3748;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🧠 Cérebro Kirvano</h1>
+            <div class="subtitle">Sistema de Gestão de Leads - Versão 2.0 Simplificada</div>
+            
+            <div class="config-info">
+                <div class="config-item">
+                    <span class="config-label">N8N Webhook:</span>
+                    <span class="config-value">${N8N_WEBHOOK_URL}</span>
+                </div>
+                <div class="config-item">
+                    <span class="config-label">Timeout PIX:</span>
+                    <span class="config-value">7 minutos</span>
+                </div>
+                <div class="config-item">
+                    <span class="config-label">Produtos:</span>
+                    <span class="config-value">CS (3 planos) | FAB (1 plano)</span>
+                </div>
+                <div class="config-item">
+                    <span class="config-label">Horário:</span>
+                    <span class="config-value">${new Date().toLocaleString('pt-BR')}</span>
+                </div>
+            </div>
+            
+            <div class="stats-grid" id="stats">
+                <div class="stat-card warning">
+                    <div class="stat-label">⏳ PIX Pendentes</div>
+                    <div class="stat-value" id="pendingPix">0</div>
+                </div>
+                
+                <div class="stat-card info">
+                    <div class="stat-label">💬 Conversas Ativas</div>
+                    <div class="stat-value" id="activeConv">0</div>
+                </div>
+                
+                <div class="stat-card success">
+                    <div class="stat-label">🚀 Instâncias</div>
+                    <div class="stat-value">${INSTANCES.length}</div>
+                </div>
+            </div>
+            
+            <button class="btn" onclick="refreshData()">🔄 Atualizar</button>
+            <button class="btn" onclick="clearData()">🗑️ Limpar Dados</button>
+        </div>
+        
+        <div class="content-panel">
+            <div class="tabs">
+                <button class="tab active" onclick="switchTab('pending')">PIX Pendentes</button>
+                <button class="tab" onclick="switchTab('conversations')">Conversas Ativas</button>
+                <button class="tab" onclick="switchTab('config')">Configuração</button>
+            </div>
+            
+            <div id="tabContent">
+                <div class="empty-state">
+                    <p>Carregando dados...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let currentTab = 'pending';
+        let statusData = null;
+        
+        async function refreshData() {
+            try {
+                const response = await fetch('/status');
+                statusData = await response.json();
+                
+                document.getElementById('pendingPix').textContent = statusData.pending_pix;
+                document.getElementById('activeConv').textContent = statusData.active_conversations;
+                
+                updateTabContent();
+            } catch (error) {
+                console.error('Erro ao carregar dados:', error);
+            }
+        }
+        
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            updateTabContent();
+        }
+        
+        function updateTabContent() {
+            const content = document.getElementById('tabContent');
+            
+            if (!statusData) {
+                content.innerHTML = '<div class="empty-state"><p>Carregando...</p></div>';
+                return;
+            }
+            
+            if (currentTab === 'pending') {
+                if (statusData.pending_list.length === 0) {
+                    content.innerHTML = '<div class="empty-state"><p>Nenhum PIX pendente no momento</p></div>';
+                } else {
+                    let html = '<table><thead><tr><th>Código</th><th>Telefone</th><th>Produto</th></tr></thead><tbody>';
+                    statusData.pending_list.forEach(item => {
+                        html += '<tr>';
+                        html += '<td>' + item.code + '</td>';
+                        html += '<td>' + item.phone + '</td>';
+                        html += '<td><span class="badge badge-' + (item.product === 'FAB' ? 'warning' : 'info') + '">' + item.product + '</span></td>';
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table>';
+                    content.innerHTML = html;
+                }
+            } else if (currentTab === 'conversations') {
+                if (statusData.conversations_list.length === 0) {
+                    content.innerHTML = '<div class="empty-state"><p>Nenhuma conversa ativa</p></div>';
+                } else {
+                    let html = '<table><thead><tr><th>Telefone</th><th>Pedido</th><th>Produto</th><th>Instância</th><th>Respostas</th><th>Status</th></tr></thead><tbody>';
+                    statusData.conversations_list.forEach(conv => {
+                        html += '<tr>';
+                        html += '<td>' + conv.phone + '</td>';
+                        html += '<td>' + conv.order_code + '</td>';
+                        html += '<td><span class="badge badge-' + (conv.product === 'FAB' ? 'warning' : 'info') + '">' + conv.product + '</span></td>';
+                        html += '<td>' + conv.instance + '</td>';
+                        html += '<td>' + conv.response_count + '</td>';
+                        html += '<td><span class="badge badge-' + (conv.waiting_for_response ? 'warning' : 'success') + '">' + (conv.waiting_for_response ? 'Aguardando' : 'Respondido') + '</span></td>';
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table>';
+                    content.innerHTML = html;
+                }
+            } else if (currentTab === 'config') {
+                content.innerHTML = \`
+                    <div style="padding: 20px;">
+                        <h3>Endpoints do Sistema</h3>
+                        <ul style="margin: 20px 0; line-height: 2;">
+                            <li><strong>Webhook Kirvano:</strong> \${window.location.origin}/webhook/kirvano</li>
+                            <li><strong>Webhook Evolution:</strong> \${window.location.origin}/webhook/evolution</li>
+                            <li><strong>Status API:</strong> \${window.location.origin}/status</li>
+                            <li><strong>Health Check:</strong> \${window.location.origin}/health</li>
+                        </ul>
+                        <h3>Produtos Configurados</h3>
+                        <ul style="margin: 20px 0; line-height: 2;">
+                            <li><strong>CS:</strong> 3 planos mapeados</li>
+                            <li><strong>FAB:</strong> 1 plano mapeado</li>
+                        </ul>
+                    </div>
+                \`;
+            }
+        }
+        
+        function clearData() {
+            if (confirm('Deseja limpar todos os dados em memória?')) {
+                alert('Função ainda não implementada');
+            }
+        }
+        
+        // Auto-refresh a cada 5 segundos
+        refreshData();
+        setInterval(refreshData, 5000);
+    </script>
+</body>
+</html>`;
+    
+    res.send(html);
+});
+
 // ============ INICIALIZAÇÃO ============
 app.listen(PORT, () => {
     console.log(`
