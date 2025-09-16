@@ -40,7 +40,6 @@ let pixTimeouts = new Map();        // Timeouts de PIX por telefone
 let conversationState = new Map();  // Estado das conversas
 let clientInstanceMap = new Map();  // Cliente -> Instância (sticky)
 let idempotencyCache = new Map();   // Cache de idempotência
-let instanceStatus = new Map();     // Cache de status das instâncias
 let instanceCounter = 0;
 let systemLogs = [];
 
@@ -68,22 +67,31 @@ function normalizePhone(phone) {
     return cleaned;
 }
 
-// Verificar se evento é aprovado (recebe valores já em UPPERCASE)
-function isApprovedEvent(EV, ST) {
-    return EV.includes('APPROVED') || 
-           EV.includes('PAID') || 
-           ST === 'APPROVED' || 
-           ST === 'PAID';
+// Verificar se evento é aprovado
+function isApprovedEvent(event, status) {
+    const eventUpper = (event || '').toUpperCase();
+    const statusUpper = (status || '').toUpperCase();
+    
+    return eventUpper.includes('APPROVED') || 
+           eventUpper.includes('PAID') ||
+           statusUpper === 'APPROVED' || 
+           statusUpper === 'PAID';
 }
 
-// Verificar se é PIX pendente (recebe valores já em UPPERCASE)
-function isPendingPixEvent(EV, ST, PM) {
-    const hasPix = PM.includes('PIX') || EV.includes('PIX'); // aceita mesmo sem method
-    const pending = ST.includes('PEND') || 
-                   ST.includes('AWAIT') || 
-                   ST.includes('CREATED') || 
-                   ST === 'PENDING';
-    return hasPix && (pending || EV.includes('PIX_GENERATED'));
+// Verificar se é PIX pendente
+function isPendingPixEvent(event, status, method) {
+    const eventUpper = (event || '').toUpperCase();
+    const statusUpper = (status || '').toUpperCase();
+    const methodUpper = (method || '').toUpperCase();
+    
+    const hasPixMethod = methodUpper.includes('PIX');
+    const isPending = statusUpper.includes('PEND') || 
+                      statusUpper.includes('AWAIT') || 
+                      statusUpper.includes('CREATED') ||
+                      statusUpper === 'PENDING' ||
+                      eventUpper.includes('PIX_GENERATED');
+    
+    return hasPixMethod && isPending;
 }
 
 // Extrair texto de mensagem Evolution (múltiplos formatos)
@@ -137,17 +145,8 @@ function checkIdempotency(key) {
     return false;
 }
 
-// Verificar se instância está online (com cache de 15 segundos)
-const INSTANCE_STATUS_TTL = 15000; // 15 segundos de cache
-
+// Verificar se instância está online
 async function checkInstanceStatus(instanceName) {
-    // Verificar cache primeiro
-    const cached = instanceStatus.get(instanceName);
-    if (cached && Date.now() - cached.checkedAt < INSTANCE_STATUS_TTL) {
-        console.log(`📡 Instância ${instanceName}: ${cached.online ? 'ONLINE' : 'OFFLINE'} (cache)`);
-        return cached.online;
-    }
-    
     try {
         const response = await axios.get(
             `${EVOLUTION_BASE_URL}/instance/connectionState/${instanceName}`,
@@ -155,24 +154,10 @@ async function checkInstanceStatus(instanceName) {
         );
         const isConnected = response.data?.state === 'open' || 
                           response.data?.instance?.state === 'open';
-        
-        // Atualizar cache
-        instanceStatus.set(instanceName, {
-            online: isConnected,
-            checkedAt: Date.now()
-        });
-        
-        console.log(`📡 Instância ${instanceName}: ${isConnected ? 'ONLINE' : 'OFFLINE'} (verificado)`);
+        console.log(`📡 Instância ${instanceName}: ${isConnected ? 'ONLINE' : 'OFFLINE'}`);
         return isConnected;
     } catch (error) {
         console.log(`⚠️ Erro ao verificar ${instanceName}: ${error.message}`);
-        
-        // Salvar no cache como offline
-        instanceStatus.set(instanceName, {
-            online: false,
-            checkedAt: Date.now()
-        });
-        
         return false;
     }
 }
@@ -306,18 +291,11 @@ setInterval(cleanupOldData, CLEANUP_INTERVAL);
 app.post('/webhook/kirvano', async (req, res) => {
     try {
         const data = req.body;
+        console.log('\n📨 WEBHOOK KIRVANO:', data.event, data.status);
         
-        // Normalizar event/status/method em UPPERCASE
-        const rawEvent = data.event;
-        const rawStatus = data.status || data.payment_status || data.payment?.status || '';
-        const rawMethod = data.payment?.method || data.payment_method || '';
-        
-        const EV = String(rawEvent).toUpperCase();
-        const ST = String(rawStatus).toUpperCase();
-        const PM = String(rawMethod).toUpperCase();
-        
-        console.log(`\n📨 WEBHOOK KIRVANO: ${EV} | Status: ${ST} | Method: ${PM}`);
-        
+        const event = data.event;
+        const status = data.status;
+        const method = data.payment?.method || data.payment_method || '';
         const saleId = data.sale_id;
         const checkoutId = data.checkout_id;
         const orderCode = saleId || checkoutId || `ORDER_${Date.now()}`;
@@ -333,8 +311,8 @@ app.post('/webhook/kirvano', async (req, res) => {
             return res.json({ success: false, message: 'Telefone inválido' });
         }
         
-        // Verificar idempotência usando valores normalizados
-        const idempotencyKey = `${EV}:${normalizedPhone}:${orderCode}`;
+        // Verificar idempotência
+        const idempotencyKey = `${event}:${normalizedPhone}:${orderCode}`;
         if (checkIdempotency(idempotencyKey)) {
             return res.json({ success: true, message: 'Evento duplicado ignorado' });
         }
@@ -351,7 +329,7 @@ app.post('/webhook/kirvano', async (req, res) => {
         const instance = await getOnlineInstanceForClient(normalizedPhone);
         
         // ========== VENDA APROVADA ==========
-        if (isApprovedEvent(EV, ST)) {
+        if (isApprovedEvent(event, status)) {
             console.log(`✅ VENDA APROVADA - ${orderCode} - ${customerName}`);
             
             // SEMPRE cancelar timeout por telefone
@@ -396,7 +374,7 @@ app.post('/webhook/kirvano', async (req, res) => {
         }
         
         // ========== PIX PENDENTE ==========
-        else if (isPendingPixEvent(EV, ST, PM)) {
+        else if (isPendingPixEvent(event, status, method)) {
             console.log(`⏳ PIX PENDENTE - ${orderCode} - ${customerName}`);
             
             // Cancelar timeout anterior se existir
@@ -461,7 +439,7 @@ app.post('/webhook/kirvano', async (req, res) => {
         }
         
         else {
-            console.log(`⚠️ Evento ignorado: ${EV} - ${ST} - ${PM}`);
+            console.log(`⚠️ Evento ignorado: ${event} - ${status} - ${method}`);
             res.json({ success: true, message: 'Evento ignorado' });
         }
         
@@ -509,13 +487,6 @@ app.post('/webhook/evolution', async (req, res) => {
         else {
             // Verificar se é a primeira resposta válida
             if (clientState.waiting_for_response && clientState.response_count === 0) {
-                // Verificar idempotência da resposta_01
-                const replyKey = `RESPOSTA_01:${normalized}:${clientState.order_code}`;
-                if (checkIdempotency(replyKey)) {
-                    console.log('🔁 resposta_01 duplicada — ignorada');
-                    return res.json({ success: true, message: 'Resposta duplicada ignorada' });
-                }
-                
                 console.log(`📥 PRIMEIRA RESPOSTA de ${normalized}`);
                 
                 // Marcar como respondido
