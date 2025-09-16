@@ -833,4 +833,326 @@ app.get('/', (req, res) => {
         }
         
         .log-error { border-left-color: #f56565; }
+        .log-error { border-left-color: #f56565; }
         .log-success { border-left-color: #48bb78; }
+        
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .tabs {
+                flex-wrap: wrap;
+            }
+            
+            h1 {
+                font-size: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🧠 Cérebro Kirvano</h1>
+            <p class="subtitle">Sistema de automação e monitoramento em tempo real</p>
+            <button class="btn" onclick="refreshData()">🔄 Atualizar Dados</button>
+            <button class="btn" onclick="window.open('/status', '_blank')">📊 API Status</button>
+        </div>
+        
+        <div class="stats-grid" id="statsGrid">
+            <!-- Stats serão carregados via JS -->
+        </div>
+        
+        <div class="content-panel">
+            <div class="tabs">
+                <button class="tab active" onclick="showTab('conversations')">💬 Conversas Ativas</button>
+                <button class="tab" onclick="showTab('pending')">⏳ PIX Pendentes</button>
+                <button class="tab" onclick="showTab('config')">⚙️ Configurações</button>
+                <button class="tab" onclick="showTab('logs')">📋 Logs</button>
+            </div>
+            
+            <div id="conversations" class="tab-content">
+                <h3>Conversas Ativas</h3>
+                <div id="conversationsTable">
+                    <!-- Tabela será carregada via JS -->
+                </div>
+            </div>
+            
+            <div id="pending" class="tab-content" style="display: none;">
+                <h3>PIX Pendentes</h3>
+                <div id="pendingTable">
+                    <!-- Tabela será carregada via JS -->
+                </div>
+            </div>
+            
+            <div id="config" class="tab-content" style="display: none;">
+                <h3>Configurações do Sistema</h3>
+                <div class="config-info" id="configInfo">
+                    <!-- Config será carregada via JS -->
+                </div>
+            </div>
+            
+            <div id="logs" class="tab-content" style="display: none;">
+                <h3>Logs Recentes</h3>
+                <div id="logsContainer">
+                    <!-- Logs serão carregados via JS -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let currentData = null;
+        
+        function showTab(tabName) {
+            // Ocultar todas as abas
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.style.display = 'none';
+            });
+            
+            // Remover classe active de todos os botões
+            document.querySelectorAll('.tab').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Mostrar aba selecionada
+            document.getElementById(tabName).style.display = 'block';
+            
+            // Adicionar classe active ao botão clicado
+            event.target.classList.add('active');
+        }
+        
+        function formatPhone(phone) {
+            if (!phone) return '';
+            const cleaned = phone.replace(/\\D/g, '');
+            return cleaned.replace(/(\\d{2})(\\d{2})(\\d{5})(\\d{4})/, '+$1 ($2) $3-$4');
+        }
+        
+        function formatDate(dateString) {
+            if (!dateString) return '';
+            return new Date(dateString).toLocaleString('pt-BR');
+        }
+        
+        function getBadgeClass(status) {
+            switch(status) {
+                case 'aprovada': return 'badge-success';
+                case 'pix': return 'badge-warning';
+                case 'timeout': return 'badge-danger';
+                default: return 'badge-info';
+            }
+        }
+        
+        function renderStats(data) {
+            const stats = [
+                {
+                    label: 'PIX Pendentes',
+                    value: data.metrics.pending_pix,
+                    class: data.metrics.pending_pix > 0 ? 'warning' : 'success'
+                },
+                {
+                    label: 'Conversas Ativas',
+                    value: data.metrics.active_conversations,
+                    class: 'info'
+                },
+                {
+                    label: 'Instâncias Mapeadas',
+                    value: data.metrics.instance_mappings,
+                    class: 'info'
+                },
+                {
+                    label: 'Cache Idempotência',
+                    value: data.metrics.idempotency_cache,
+                    class: 'info'
+                }
+            ];
+            
+            const html = stats.map(stat => `
+                <div class="stat-card ${stat.class}">
+                    <div class="stat-label">${stat.label}</div>
+                    <div class="stat-value">${stat.value}</div>
+                </div>
+            `).join('');
+            
+            document.getElementById('statsGrid').innerHTML = html;
+        }
+        
+        function renderConversations(conversations) {
+            if (conversations.length === 0) {
+                document.getElementById('conversationsTable').innerHTML = `
+                    <div class="empty-state">
+                        <h3>🎉 Nenhuma conversa ativa</h3>
+                        <p>Todas as conversas foram finalizadas</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Cliente</th>
+                            <th>Pedido</th>
+                            <th>Produto</th>
+                            <th>Instância</th>
+                            <th>Respostas</th>
+                            <th>Aguardando</th>
+                            <th>Criado</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${conversations.map(conv => `
+                            <tr>
+                                <td>${formatPhone(conv.phone)}</td>
+                                <td><code>${conv.order_code}</code></td>
+                                <td><span class="badge ${getBadgeClass(conv.original_event)}">${conv.product}</span></td>
+                                <td>${conv.instance}</td>
+                                <td>${conv.response_count}</td>
+                                <td>${conv.waiting_for_response ? '✅ Sim' : '❌ Não'}</td>
+                                <td>${formatDate(conv.created_at)}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+            
+            document.getElementById('conversationsTable').innerHTML = html;
+        }
+        
+        function renderPending(pending) {
+            if (pending.length === 0) {
+                document.getElementById('pendingTable').innerHTML = `
+                    <div class="empty-state">
+                        <h3>✅ Nenhum PIX pendente</h3>
+                        <p>Todos os pagamentos foram processados</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Cliente</th>
+                            <th>Pedido</th>
+                            <th>Produto</th>
+                            <th>Timeout em</th>
+                            <th>Criado</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${pending.map(pix => {
+                            const createdAt = new Date(pix.created_at);
+                            const timeoutAt = new Date(createdAt.getTime() + 7 * 60 * 1000);
+                            const remaining = Math.max(0, Math.floor((timeoutAt - new Date()) / 1000 / 60));
+                            
+                            return `
+                                <tr>
+                                    <td>${formatPhone(pix.phone)}</td>
+                                    <td><code>${pix.order_code}</code></td>
+                                    <td><span class="badge badge-warning">${pix.product}</span></td>
+                                    <td>${remaining}min restantes</td>
+                                    <td>${formatDate(pix.created_at)}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+            
+            document.getElementById('pendingTable').innerHTML = html;
+        }
+        
+        function renderConfig(config) {
+            const configItems = [
+                { label: 'Webhook N8N', value: config.n8n_webhook },
+                { label: 'URL Evolution', value: config.evolution_base_url },
+                { label: 'Timeout PIX', value: config.pix_timeout },
+                { label: 'Retenção de dados', value: config.data_retention },
+                { label: 'Instâncias', value: config.instances_count }
+            ];
+            
+            const html = configItems.map(item => `
+                <div class="config-item">
+                    <span class="config-label">${item.label}:</span>
+                    <span class="config-value">${item.value}</span>
+                </div>
+            `).join('');
+            
+            document.getElementById('configInfo').innerHTML = html;
+        }
+        
+        function renderLogs(logs) {
+            if (!logs || logs.length === 0) {
+                document.getElementById('logsContainer').innerHTML = `
+                    <div class="empty-state">
+                        <h3>📝 Nenhum log recente</h3>
+                        <p>Os logs aparecerão aqui conforme o sistema processa eventos</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const html = logs.map(log => {
+                const logClass = log.type.includes('error') ? 'log-error' : 
+                               log.type.includes('success') ? 'log-success' : '';
+                
+                return `
+                    <div class="log-entry ${logClass}">
+                        <strong>${formatDate(log.timestamp)}</strong> - 
+                        <span>${log.type}</span> - 
+                        <span>${log.event || 'N/A'}</span>
+                        ${log.error ? `<br><em>Erro: ${log.error}</em>` : ''}
+                    </div>
+                `;
+            }).join('');
+            
+            document.getElementById('logsContainer').innerHTML = html;
+        }
+        
+        async function refreshData() {
+            try {
+                const response = await fetch('/status');
+                currentData = await response.json();
+                
+                renderStats(currentData);
+                renderConversations(currentData.conversations_list || []);
+                renderPending(currentData.pending_list || []);
+                renderConfig(currentData.config || {});
+                renderLogs(currentData.recent_logs || []);
+                
+                console.log('✅ Dados atualizados:', new Date().toLocaleTimeString());
+            } catch (error) {
+                console.error('❌ Erro ao atualizar dados:', error);
+                alert('Erro ao carregar dados. Verifique a conexão.');
+            }
+        }
+        
+        // Carregar dados iniciais
+        refreshData();
+        
+        // Auto-refresh a cada 30 segundos
+        setInterval(refreshData, 30000);
+    </script>
+</body>
+</html>`;
+    
+    res.send(html);
+});
+
+// ============ INICIALIZAÇÃO ============
+app.listen(PORT, () => {
+    console.log(`\n🚀 CÉREBRO KIRVANO INICIADO`);
+    console.log(`📊 Painel: http://localhost:${PORT}`);
+    console.log(`🔗 Status API: http://localhost:${PORT}/status`);
+    console.log(`📱 Webhook Kirvano: /webhook/kirvano`);
+    console.log(`💬 Webhook Evolution: /webhook/evolution`);
+    console.log(`\n⚙️ CONFIGURAÇÕES:`);
+    console.log(`   N8N: ${N8N_WEBHOOK_URL}`);
+    console.log(`   Evolution: ${EVOLUTION_BASE_URL}`);
+    console.log(`   PIX Timeout: ${PIX_TIMEOUT / 1000 / 60} minutos`);
+    console.log(`   Instâncias: ${INSTANCES.length}`);
+    console.log(`\n✅ Sistema pronto para receber webhooks!`);
+});
