@@ -40,6 +40,7 @@ let pixTimeouts = new Map();        // Timeouts de PIX por telefone
 let conversationState = new Map();  // Estado das conversas
 let clientInstanceMap = new Map();  // Cliente -> Instância (sticky)
 let idempotencyCache = new Map();   // Cache de idempotência
+let instanceStatus = new Map();     // Cache de status das instâncias
 let instanceCounter = 0;
 let systemLogs = [];
 
@@ -67,31 +68,22 @@ function normalizePhone(phone) {
     return cleaned;
 }
 
-// Verificar se evento é aprovado
-function isApprovedEvent(event, status) {
-    const eventUpper = (event || '').toUpperCase();
-    const statusUpper = (status || '').toUpperCase();
-    
-    return eventUpper.includes('APPROVED') || 
-           eventUpper.includes('PAID') ||
-           statusUpper === 'APPROVED' || 
-           statusUpper === 'PAID';
+// Verificar se evento é aprovado (recebe valores já em UPPERCASE)
+function isApprovedEvent(EV, ST) {
+    return EV.includes('APPROVED') || 
+           EV.includes('PAID') || 
+           ST === 'APPROVED' || 
+           ST === 'PAID';
 }
 
-// Verificar se é PIX pendente
-function isPendingPixEvent(event, status, method) {
-    const eventUpper = (event || '').toUpperCase();
-    const statusUpper = (status || '').toUpperCase();
-    const methodUpper = (method || '').toUpperCase();
-    
-    const hasPixMethod = methodUpper.includes('PIX');
-    const isPending = statusUpper.includes('PEND') || 
-                      statusUpper.includes('AWAIT') || 
-                      statusUpper.includes('CREATED') ||
-                      statusUpper === 'PENDING' ||
-                      eventUpper.includes('PIX_GENERATED');
-    
-    return hasPixMethod && isPending;
+// Verificar se é PIX pendente (recebe valores já em UPPERCASE)
+function isPendingPixEvent(EV, ST, PM) {
+    const hasPix = PM.includes('PIX') || EV.includes('PIX'); // aceita mesmo sem method
+    const pending = ST.includes('PEND') || 
+                   ST.includes('AWAIT') || 
+                   ST.includes('CREATED') || 
+                   ST === 'PENDING';
+    return hasPix && (pending || EV.includes('PIX_GENERATED'));
 }
 
 // Extrair texto de mensagem Evolution (múltiplos formatos)
@@ -145,8 +137,17 @@ function checkIdempotency(key) {
     return false;
 }
 
-// Verificar se instância está online
+// Verificar se instância está online (com cache de 15 segundos)
+const INSTANCE_STATUS_TTL = 15000; // 15 segundos de cache
+
 async function checkInstanceStatus(instanceName) {
+    // Verificar cache primeiro
+    const cached = instanceStatus.get(instanceName);
+    if (cached && Date.now() - cached.checkedAt < INSTANCE_STATUS_TTL) {
+        console.log(`📡 Instância ${instanceName}: ${cached.online ? 'ONLINE' : 'OFFLINE'} (cache)`);
+        return cached.online;
+    }
+    
     try {
         const response = await axios.get(
             `${EVOLUTION_BASE_URL}/instance/connectionState/${instanceName}`,
@@ -154,10 +155,24 @@ async function checkInstanceStatus(instanceName) {
         );
         const isConnected = response.data?.state === 'open' || 
                           response.data?.instance?.state === 'open';
-        console.log(`📡 Instância ${instanceName}: ${isConnected ? 'ONLINE' : 'OFFLINE'}`);
+        
+        // Atualizar cache
+        instanceStatus.set(instanceName, {
+            online: isConnected,
+            checkedAt: Date.now()
+        });
+        
+        console.log(`📡 Instância ${instanceName}: ${isConnected ? 'ONLINE' : 'OFFLINE'} (verificado)`);
         return isConnected;
     } catch (error) {
         console.log(`⚠️ Erro ao verificar ${instanceName}: ${error.message}`);
+        
+        // Salvar no cache como offline
+        instanceStatus.set(instanceName, {
+            online: false,
+            checkedAt: Date.now()
+        });
+        
         return false;
     }
 }
@@ -291,11 +306,18 @@ setInterval(cleanupOldData, CLEANUP_INTERVAL);
 app.post('/webhook/kirvano', async (req, res) => {
     try {
         const data = req.body;
-        console.log('\n📨 WEBHOOK KIRVANO:', data.event, data.status);
         
-        const event = data.event;
-        const status = data.status;
-        const method = data.payment?.method || data.payment_method || '';
+        // Normalizar event/status/method em UPPERCASE
+        const rawEvent = data.event;
+        const rawStatus = data.status || data.payment_status || data.payment?.status || '';
+        const rawMethod = data.payment?.method || data.payment_method || '';
+        
+        const EV = String(rawEvent).toUpperCase();
+        const ST = String(rawStatus).toUpperCase();
+        const PM = String(rawMethod).toUpperCase();
+        
+        console.log(`\n📨 WEBHOOK KIRVANO: ${EV} | Status: ${ST} | Method: ${PM}`);
+        
         const saleId = data.sale_id;
         const checkoutId = data.checkout_id;
         const orderCode = saleId || checkoutId || `ORDER_${Date.now()}`;
@@ -311,8 +333,8 @@ app.post('/webhook/kirvano', async (req, res) => {
             return res.json({ success: false, message: 'Telefone inválido' });
         }
         
-        // Verificar idempotência
-        const idempotencyKey = `${event}:${normalizedPhone}:${orderCode}`;
+        // Verificar idempotência usando valores normalizados
+        const idempotencyKey = `${EV}:${normalizedPhone}:${orderCode}`;
         if (checkIdempotency(idempotencyKey)) {
             return res.json({ success: true, message: 'Evento duplicado ignorado' });
         }
@@ -329,7 +351,7 @@ app.post('/webhook/kirvano', async (req, res) => {
         const instance = await getOnlineInstanceForClient(normalizedPhone);
         
         // ========== VENDA APROVADA ==========
-        if (isApprovedEvent(event, status)) {
+        if (isApprovedEvent(EV, ST)) {
             console.log(`✅ VENDA APROVADA - ${orderCode} - ${customerName}`);
             
             // SEMPRE cancelar timeout por telefone
@@ -374,7 +396,7 @@ app.post('/webhook/kirvano', async (req, res) => {
         }
         
         // ========== PIX PENDENTE ==========
-        else if (isPendingPixEvent(event, status, method)) {
+        else if (isPendingPixEvent(EV, ST, PM)) {
             console.log(`⏳ PIX PENDENTE - ${orderCode} - ${customerName}`);
             
             // Cancelar timeout anterior se existir
@@ -439,7 +461,7 @@ app.post('/webhook/kirvano', async (req, res) => {
         }
         
         else {
-            console.log(`⚠️ Evento ignorado: ${event} - ${status} - ${method}`);
+            console.log(`⚠️ Evento ignorado: ${EV} - ${ST} - ${PM}`);
             res.json({ success: true, message: 'Evento ignorado' });
         }
         
@@ -487,6 +509,13 @@ app.post('/webhook/evolution', async (req, res) => {
         else {
             // Verificar se é a primeira resposta válida
             if (clientState.waiting_for_response && clientState.response_count === 0) {
+                // Verificar idempotência da resposta_01
+                const replyKey = `RESPOSTA_01:${normalized}:${clientState.order_code}`;
+                if (checkIdempotency(replyKey)) {
+                    console.log('🔁 resposta_01 duplicada — ignorada');
+                    return res.json({ success: true, message: 'Resposta duplicada ignorada' });
+                }
+                
                 console.log(`📥 PRIMEIRA RESPOSTA de ${normalized}`);
                 
                 // Marcar como respondido
@@ -805,41 +834,3 @@ app.get('/', (req, res) => {
         
         .log-error { border-left-color: #f56565; }
         .log-success { border-left-color: #48bb78; }
-        </style> </head> <body> <div class="container"> <div class="header"> <h1>🧠 Cérebro Kirvano</h1> <div class="subtitle">Painel de Controle</div>
-  <div class="stats-grid">
-    <div class="stat-card warning">
-      <div class="stat-label">⏳ PIX Pendentes</div>
-      <div class="stat-value" id="stat-pending">0</div>
-    </div>
-    <div class="stat-card info">
-      <div class="stat-label">💬 Conversas Ativas</div>
-      <div class="stat-value" id="stat-conv">0</div>
-    </div>
-    <div class="stat-card success">
-      <div class="stat-label">🔗 Mapeamentos de Instância</div>
-      <div class="stat-value" id="stat-maps">0</div>
-    </div>
-    <div class="stat-card danger">
-      <div class="stat-label">🔒 Cache Idempotência</div>
-      <div class="stat-value" id="stat-idem">0</div>
-    </div>
-  </div>
-</div>
-
-<div class="content-panel">
-  <div class="tabs" id="tabs">
-    <button class="tab active" data-tab="pending">PIX Pendentes</button>
-    <button class="tab" data-tab="conversations">Conversas</button>
-    <button class="tab" data-tab="config">Configuração</button>
-    <button class="tab" data-tab="logs">Logs</button>
-  </div>
-
-  <div id="tab-content">
-    <div class="empty-state">Carregando dados...</div>
-  </div>
-</div>
-</div> <script> let statusData = null; let currentTab = 'pending'; async function fetchStatus() { try { const res = await fetch('/status'); statusData = await res.json(); updateStats(); renderTab(); } catch (e) { document.getElementById('tab-content').innerHTML = '<div class="empty-state">❌ Erro ao carregar /status</div>'; } } function updateStats() { if (!statusData) return; document.getElementById('stat-pending').textContent = statusData.metrics.pending_pix; document.getElementById('stat-conv').textContent = statusData.metrics.active_conversations; document.getElementById('stat-maps').textContent = statusData.metrics.instance_mappings; document.getElementById('stat-idem').textContent = statusData.metrics.idempotency_cache; } function setActiveTab(tab) { currentTab = tab; document.querySelectorAll('#tabs .tab').forEach(b => { b.classList.toggle('active', b.dataset.tab === tab); }); renderTab(); } function renderTab() { const el = document.getElementById('tab-content'); if (!statusData) { el.innerHTML = '<div class="empty-state">Carregando...</div>'; return; } if (currentTab === 'pending') { const items = statusData.pending_list || []; if (items.length === 0) { el.innerHTML = '<div class="empty-state">✅ Nenhum PIX pendente</div>'; return; } let html = '<table><thead><tr><th>Telefone</th><th>Pedido</th><th>Produto</th><th>Criado em</th></tr></thead><tbody>'; for (const p of items) { html += `<tr> <td>${p.phone}</td> <td>${p.order_code}</td> <td><span class="badge ${p.product === 'FAB' ? 'badge-warning' : 'badge-info'}">${p.product}</span></td> <td>${new Date(p.created_at).toLocaleString('pt-BR')}</td> </tr>`; } html += '</tbody></table>'; el.innerHTML = html; } if (currentTab === 'conversations') { const convs = statusData.conversations_list || []; if (convs.length === 0) { el.innerHTML = '<div class="empty-state">💭 Nenhuma conversa ativa</div>'; return; } let html = '<table><thead><tr><th>Telefone</th><th>Pedido</th><th>Produto</th><th>Instância</th><th>Respostas</th><th>Status</th><th>Criado</th></tr></thead><tbody>'; for (const c of convs) { html += `<tr> <td>${c.phone}</td> <td>${c.order_code}</td> <td><span class="badge ${c.product === 'FAB' ? 'badge-warning' : 'badge-info'}">${c.product}</span></td> <td>${c.instance}</td> <td>${c.response_count}</td> <td><span class="badge ${c.waiting_for_response ? 'badge-warning' : 'badge-success'}">${c.waiting_for_response ? 'Aguardando' : 'Respondido'}</span></td> <td>${new Date(c.created_at).toLocaleString('pt-BR')}</td> </tr>`; } html += '</tbody></table>'; el.innerHTML = html; } if (currentTab === 'config') { const cfg = statusData.config || {}; el.innerHTML = ` <div class="config-info"> <div class="config-item"><span class="config-label">N8N Webhook:</span><span class="config-value">${cfg.n8n_webhook || ''}</span></div> <div class="config-item"><span class="config-label">Evolution Base URL:</span><span class="config-value">${cfg.evolution_base_url || ''}</span></div> <div class="config-item"><span class="config-label">PIX Timeout:</span><span class="config-value">${cfg.pix_timeout || ''}</span></div> <div class="config-item"><span class="config-label">Retenção de Dados:</span><span class="config-value">${cfg.data_retention || ''}</span></div> <div class="config-item"><span class="config-label">Instâncias Configuradas:</span><span class="config-value">${cfg.instances_count || 0}</span></div> <div class="config-item"><span class="config-label">Último status:</span><span class="config-value">${statusData.timestamp}</span></div> </div> `; } if (currentTab === 'logs') { const logs = statusData.recent_logs || []; if (logs.length === 0) { el.innerHTML = '<div class="empty-state">📭 Sem logs recentes</div>'; return; } let html = ''; for (const l of logs) { const cls = l.type === 'n8n_error' ? 'log-entry log-error' : 'log-entry log-success'; const ts = new Date(l.timestamp).toLocaleString('pt-BR'); html += `<div class="${cls}"> <div><strong>${ts}</strong> — <em>${l.type}</em> — ${l.event || ''}</div> ${l.error ? `<div>Erro: ${l.error}</div>` : ''} </div>`; } el.innerHTML = html; } } // Tab click handler document.getElementById('tabs').addEventListener('click', (e) => { if (e.target.classList.contains('tab')) { setActiveTab(e.target.dataset.tab); } }); // Boot fetchStatus(); setInterval(fetchStatus, 8000); </script> </body> </html>`; res.send(html); });
-// ============ INICIALIZAÇÃO ============
-app.listen(PORT, () => {
-console.log(🚀 Servidor rodando em http://localhost:${PORT});
-});
