@@ -805,3 +805,41 @@ app.get('/', (req, res) => {
         
         .log-error { border-left-color: #f56565; }
         .log-success { border-left-color: #48bb78; }
+        </style> </head> <body> <div class="container"> <div class="header"> <h1>🧠 Cérebro Kirvano</h1> <div class="subtitle">Painel de Controle</div>
+  <div class="stats-grid">
+    <div class="stat-card warning">
+      <div class="stat-label">⏳ PIX Pendentes</div>
+      <div class="stat-value" id="stat-pending">0</div>
+    </div>
+    <div class="stat-card info">
+      <div class="stat-label">💬 Conversas Ativas</div>
+      <div class="stat-value" id="stat-conv">0</div>
+    </div>
+    <div class="stat-card success">
+      <div class="stat-label">🔗 Mapeamentos de Instância</div>
+      <div class="stat-value" id="stat-maps">0</div>
+    </div>
+    <div class="stat-card danger">
+      <div class="stat-label">🔒 Cache Idempotência</div>
+      <div class="stat-value" id="stat-idem">0</div>
+    </div>
+  </div>
+</div>
+
+<div class="content-panel">
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="pending">PIX Pendentes</button>
+    <button class="tab" data-tab="conversations">Conversas</button>
+    <button class="tab" data-tab="config">Configuração</button>
+    <button class="tab" data-tab="logs">Logs</button>
+  </div>
+
+  <div id="tab-content">
+    <div class="empty-state">Carregando dados...</div>
+  </div>
+</div>
+</div> <script> let statusData = null; let currentTab = 'pending'; async function fetchStatus() { try { const res = await fetch('/status'); statusData = await res.json(); updateStats(); renderTab(); } catch (e) { document.getElementById('tab-content').innerHTML = '<div class="empty-state">❌ Erro ao carregar /status</div>'; } } function updateStats() { if (!statusData) return; document.getElementById('stat-pending').textContent = statusData.metrics.pending_pix; document.getElementById('stat-conv').textContent = statusData.metrics.active_conversations; document.getElementById('stat-maps').textContent = statusData.metrics.instance_mappings; document.getElementById('stat-idem').textContent = statusData.metrics.idempotency_cache; } function setActiveTab(tab) { currentTab = tab; document.querySelectorAll('#tabs .tab').forEach(b => { b.classList.toggle('active', b.dataset.tab === tab); }); renderTab(); } function renderTab() { const el = document.getElementById('tab-content'); if (!statusData) { el.innerHTML = '<div class="empty-state">Carregando...</div>'; return; } if (currentTab === 'pending') { const items = statusData.pending_list || []; if (items.length === 0) { el.innerHTML = '<div class="empty-state">✅ Nenhum PIX pendente</div>'; return; } let html = '<table><thead><tr><th>Telefone</th><th>Pedido</th><th>Produto</th><th>Criado em</th></tr></thead><tbody>'; for (const p of items) { html += `<tr> <td>${p.phone}</td> <td>${p.order_code}</td> <td><span class="badge ${p.product === 'FAB' ? 'badge-warning' : 'badge-info'}">${p.product}</span></td> <td>${new Date(p.created_at).toLocaleString('pt-BR')}</td> </tr>`; } html += '</tbody></table>'; el.innerHTML = html; } if (currentTab === 'conversations') { const convs = statusData.conversations_list || []; if (convs.length === 0) { el.innerHTML = '<div class="empty-state">💭 Nenhuma conversa ativa</div>'; return; } let html = '<table><thead><tr><th>Telefone</th><th>Pedido</th><th>Produto</th><th>Instância</th><th>Respostas</th><th>Status</th><th>Criado</th></tr></thead><tbody>'; for (const c of convs) { html += `<tr> <td>${c.phone}</td> <td>${c.order_code}</td> <td><span class="badge ${c.product === 'FAB' ? 'badge-warning' : 'badge-info'}">${c.product}</span></td> <td>${c.instance}</td> <td>${c.response_count}</td> <td><span class="badge ${c.waiting_for_response ? 'badge-warning' : 'badge-success'}">${c.waiting_for_response ? 'Aguardando' : 'Respondido'}</span></td> <td>${new Date(c.created_at).toLocaleString('pt-BR')}</td> </tr>`; } html += '</tbody></table>'; el.innerHTML = html; } if (currentTab === 'config') { const cfg = statusData.config || {}; el.innerHTML = ` <div class="config-info"> <div class="config-item"><span class="config-label">N8N Webhook:</span><span class="config-value">${cfg.n8n_webhook || ''}</span></div> <div class="config-item"><span class="config-label">Evolution Base URL:</span><span class="config-value">${cfg.evolution_base_url || ''}</span></div> <div class="config-item"><span class="config-label">PIX Timeout:</span><span class="config-value">${cfg.pix_timeout || ''}</span></div> <div class="config-item"><span class="config-label">Retenção de Dados:</span><span class="config-value">${cfg.data_retention || ''}</span></div> <div class="config-item"><span class="config-label">Instâncias Configuradas:</span><span class="config-value">${cfg.instances_count || 0}</span></div> <div class="config-item"><span class="config-label">Último status:</span><span class="config-value">${statusData.timestamp}</span></div> </div> `; } if (currentTab === 'logs') { const logs = statusData.recent_logs || []; if (logs.length === 0) { el.innerHTML = '<div class="empty-state">📭 Sem logs recentes</div>'; return; } let html = ''; for (const l of logs) { const cls = l.type === 'n8n_error' ? 'log-entry log-error' : 'log-entry log-success'; const ts = new Date(l.timestamp).toLocaleString('pt-BR'); html += `<div class="${cls}"> <div><strong>${ts}</strong> — <em>${l.type}</em> — ${l.event || ''}</div> ${l.error ? `<div>Erro: ${l.error}</div>` : ''} </div>`; } el.innerHTML = html; } } // Tab click handler document.getElementById('tabs').addEventListener('click', (e) => { if (e.target.classList.contains('tab')) { setActiveTab(e.target.dataset.tab); } }); // Boot fetchStatus(); setInterval(fetchStatus, 8000); </script> </body> </html>`; res.send(html); });
+// ============ INICIALIZAÇÃO ============
+app.listen(PORT, () => {
+console.log(🚀 Servidor rodando em http://localhost:${PORT});
+});
