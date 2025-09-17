@@ -11,15 +11,15 @@ const DATA_RETENTION = 24 * 60 * 60 * 1000; // 24 horas
 const IDEMPOTENCY_TTL = 5 * 60 * 1000; // 5 minutos
 const PORT = process.env.PORT || 3000;
 
-// Mapeamento dos produtos Kirvano (3 planos CS + 1 plano FAB)
+// Mapeamento dos produtos Kirvano (2 produtos: CS e FAB)
 const PRODUCT_MAPPING = {
-    // CS - 3 planos diferentes
-    '5c1f6390-8999-4740-b16f-51380e1097e4': 'CS',  // CS Plano 1
-    '0f393085-4960-4c71-9efe-faee8ba51d3f': 'CS',  // CS Plano 2
-    'e2282b4c-878c-4bcd-becb-1977dfd6d2b8': 'CS',  // CS Plano 3
+    // CS - Planos diversos que mapeiam para CS
+    '5c1f6390-8999-4740-b16f-51380e1097e4': 'CS',
+    '0f393085-4960-4c71-9efe-faee8ba51d3f': 'CS',
+    'e2282b4c-878c-4bcd-becb-1977dfd6d2b8': 'CS',
     
-    // FAB - 1 plano
-    '5288799c-d8e3-48ce-a91d-587814acdee5': 'FAB'  // FAB Único
+    // FAB - Plano único
+    '5288799c-d8e3-48ce-a91d-587814acdee5': 'FAB'
 };
 
 // Instâncias Evolution (9 instâncias)
@@ -861,7 +861,7 @@ app.get('/', (req, res) => {
                 </div>
                 <div class="config-item">
                     <span class="config-label">Produtos:</span>
-                    <span class="config-value">CS (3 planos) | FAB (1 plano)</span>
+                    <span class="config-value">CS | FAB</span>
                 </div>
                 <div class="config-item">
                     <span class="config-label">Instâncias:</span>
@@ -1084,10 +1084,10 @@ app.listen(PORT, () => {
 ════════════════════════════════════════`);
     
     // Warm-up: verificar todas as instâncias ao iniciar
-    console.log('\\n🔥 Aquecendo instâncias...');
+    console.log('\n🔥 Aquecendo instâncias...');
     INSTANCES.forEach(i => {
         checkInstanceStatus(i.name).catch(() => {
-            console.log(\`⚠️ Falha no warm-up de \${i.name}\`);
+            console.log(`⚠️ Falha no warm-up de ${i.name}`);
         });
     });
 });
