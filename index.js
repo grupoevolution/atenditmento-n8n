@@ -1084,19 +1084,10 @@ app.listen(PORT, () => {
 ════════════════════════════════════════`);
     
     // Warm-up: verificar todas as instâncias ao iniciar
-    console.log('\n🔥 Aquecendo instâncias...');
+    console.log('\\n🔥 Aquecendo instâncias...');
     INSTANCES.forEach(i => {
         checkInstanceStatus(i.name).catch(() => {
-            console.log(`⚠️ Falha no warm-up de ${i.name}`);
+            console.log(\`⚠️ Falha no warm-up de \${i.name}\`);
         });
     });
 });
-            padding: 10px;
-            margin-bottom: 10px;
-            border-radius: 5px;
-            font-family: monospace;
-            font-size: 0.85rem;
-        }
-        
-        .log-error { border-left-color: #f56565; }
-        .log-success { border-left-color: #48bb78; }
