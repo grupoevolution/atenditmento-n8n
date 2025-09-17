@@ -5,6 +5,7 @@ const app = express();
 // ============ CONFIGURAÇÕES ============
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || 'https://n8n.flowzap.fun/webhook/atendimento-n8n';
 const EVOLUTION_BASE_URL = process.env.EVOLUTION_BASE_URL || 'https://evo.flowzap.fun';
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || 'SUA_API_KEY_AQUI';
 const PIX_TIMEOUT = 7 * 60 * 1000; // 7 minutos
 const CLEANUP_INTERVAL = 10 * 60 * 1000; // 10 minutos
 const DATA_RETENTION = 24 * 60 * 60 * 1000; // 24 horas
@@ -40,9 +41,8 @@ let pixTimeouts = new Map();        // Timeouts de PIX por telefone
 let conversationState = new Map();  // Estado das conversas
 let clientInstanceMap = new Map();  // Cliente -> Instância (sticky)
 let idempotencyCache = new Map();   // Cache de idempotência
-let instanceStatus = new Map();     // Cache de status das instâncias
 let instanceCounter = 0;
-let systemLogs = [];
+let eventHistory = [];              // Histórico de eventos das últimas 24h
 
 app.use(express.json());
 
@@ -151,110 +151,29 @@ function checkIdempotency(key) {
     return false;
 }
 
-// Verificar se instância está online (com cache de 15 segundos)
-const INSTANCE_STATUS_TTL = 15000; // 15 segundos de cache
-
-async function checkInstanceStatus(instanceName) {
-    // Verificar cache primeiro
-    const cached = instanceStatus.get(instanceName);
-    if (cached && Date.now() - cached.checkedAt < INSTANCE_STATUS_TTL) {
-        console.log(`📡 Instância ${instanceName}: ${cached.online ? 'ONLINE' : 'OFFLINE'} (cache)`);
-        return cached.online;
-    }
-    
-    const url = `${EVOLUTION_BASE_URL}/instance/connectionState/${instanceName}`;
-    console.log(`🔍 Verificando ${instanceName} em: ${url}`);
-    
-    try {
-        const response = await axios.get(url, { 
-            timeout: 5000,
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        });
-        
-        console.log(`📊 Resposta para ${instanceName}:`, {
-            status: response.status,
-            data: response.data
-        });
-        
-        // Tentar diferentes formas de verificar se está conectado
-        const data = response.data;
-        let isConnected = false;
-        
-        if (data.state === 'open') isConnected = true;
-        if (data.instance?.state === 'open') isConnected = true;
-        if (data.status === 'open') isConnected = true;
-        if (data.connectionState === 'open') isConnected = true;
-        if (data.connected === true) isConnected = true;
-        
-        // Atualizar cache
-        instanceStatus.set(instanceName, {
-            online: isConnected,
-            checkedAt: Date.now(),
-            lastResponse: data
-        });
-        
-        console.log(`📡 Instância ${instanceName}: ${isConnected ? 'ONLINE' : 'OFFLINE'} (verificado)`);
-        return isConnected;
-        
-    } catch (error) {
-        console.log(`❌ Erro ao verificar ${instanceName}:`, {
-            message: error.message,
-            code: error.code,
-            status: error.response?.status,
-            data: error.response?.data
-        });
-        
-        // Salvar no cache como offline
-        instanceStatus.set(instanceName, {
-            online: false,
-            checkedAt: Date.now(),
-            error: error.message
-        });
-        
-        return false;
-    }
-}
-
-// Obter instância online (com fallback)
-async function getOnlineInstanceForClient(phone) {
+// Obter próxima instância (round-robin simples)
+function getNextInstanceForClient(phone) {
     const normalized = normalizePhone(phone);
     
-    // Se já tem instância atribuída, verifica se está online
+    // Se já tem instância atribuída, mantém a mesma
     if (clientInstanceMap.has(normalized)) {
         const assigned = clientInstanceMap.get(normalized);
-        const isOnline = await checkInstanceStatus(assigned.instance);
-        if (isOnline) {
-            console.log(`✅ Cliente ${normalized} mantido em ${assigned.instance}`);
-            return assigned.instance;
-        }
-        console.log(`⚠️ Instância ${assigned.instance} offline, buscando alternativa...`);
+        console.log(`✅ Cliente ${normalized} mantido em ${assigned.instance}`);
+        return assigned.instance;
     }
     
-    // Buscar próxima instância online
-    for (let i = 0; i < INSTANCES.length; i++) {
-        const idx = (instanceCounter + i) % INSTANCES.length;
-        const instance = INSTANCES[idx];
-        
-        const isOnline = await checkInstanceStatus(instance.name);
-        if (isOnline) {
-            instanceCounter = idx + 1;
-            
-            // Salvar mapeamento com timestamp
-            clientInstanceMap.set(normalized, {
-                instance: instance.name,
-                createdAt: new Date()
-            });
-            
-            console.log(`✅ Cliente ${normalized} atribuído a ${instance.name}`);
-            return instance.name;
-        }
-    }
+    // Atribui próxima instância na sequência
+    const instance = INSTANCES[instanceCounter % INSTANCES.length];
+    instanceCounter++;
     
-    // Se nenhuma online, usa a primeira como fallback
-    console.log(`❌ Nenhuma instância online! Usando ${INSTANCES[0].name} como fallback`);
-    return INSTANCES[0].name;
+    // Salvar mapeamento
+    clientInstanceMap.set(normalized, {
+        instance: instance.name,
+        createdAt: new Date()
+    });
+    
+    console.log(`✅ Cliente ${normalized} atribuído a ${instance.name}`);
+    return instance.name;
 }
 
 // Cancelar timeout de PIX por telefone
@@ -272,8 +191,41 @@ function cancelPixTimeout(phone) {
     return false;
 }
 
+// Registrar evento no histórico
+function logEvent(eventType, phone, instance, status = 'pending') {
+    const event = {
+        id: Date.now() + Math.random(),
+        timestamp: new Date(),
+        event_type: eventType,
+        phone: phone,
+        instance: instance,
+        status: status, // 'pending', 'sent', 'error'
+        n8n_sent_at: null,
+        error: null
+    };
+    
+    eventHistory.unshift(event);
+    
+    // Manter apenas últimas 24h (aproximadamente 1000 eventos)
+    if (eventHistory.length > 1000) {
+        eventHistory = eventHistory.slice(0, 1000);
+    }
+    
+    return event.id;
+}
+
+// Atualizar status do evento
+function updateEventStatus(eventId, status, error = null) {
+    const event = eventHistory.find(e => e.id === eventId);
+    if (event) {
+        event.status = status;
+        event.n8n_sent_at = status === 'sent' ? new Date() : null;
+        event.error = error;
+    }
+}
+
 // Enviar para N8N
-async function sendToN8N(eventData) {
+async function sendToN8N(eventData, eventId = null) {
     try {
         console.log(`📤 Enviando para N8N: ${eventData.event_type}`);
         const response = await axios.post(N8N_WEBHOOK_URL, eventData, {
@@ -281,21 +233,19 @@ async function sendToN8N(eventData) {
             timeout: 15000
         });
         console.log(`✅ N8N respondeu: ${response.status}`);
-        systemLogs.push({
-            timestamp: new Date(),
-            type: 'n8n_success',
-            event: eventData.event_type,
-            data: eventData
-        });
+        
+        if (eventId) {
+            updateEventStatus(eventId, 'sent');
+        }
+        
         return { success: true };
     } catch (error) {
         console.error(`❌ Erro N8N: ${error.message}`);
-        systemLogs.push({
-            timestamp: new Date(),
-            type: 'n8n_error',
-            event: eventData.event_type,
-            error: error.message
-        });
+        
+        if (eventId) {
+            updateEventStatus(eventId, 'error', error.message);
+        }
+        
         return { success: false, error: error.message };
     }
 }
@@ -331,10 +281,12 @@ function cleanupOldData() {
         }
     }
     
-    // Limpar logs antigos (manter últimos 1000)
-    if (systemLogs.length > 1000) {
-        systemLogs = systemLogs.slice(-1000);
-    }
+    // Limpar eventos antigos (manter últimas 24h)
+    const oldEventCount = eventHistory.length;
+    eventHistory = eventHistory.filter(event => 
+        event.timestamp.getTime() > cutoff
+    );
+    cleaned += oldEventCount - eventHistory.length;
     
     console.log(`🧹 Limpeza executada: ${cleaned} itens removidos`);
 }
@@ -387,8 +339,8 @@ app.post('/webhook/kirvano', async (req, res) => {
             console.log(`📦 Produto: ${productType} (offer_id: ${offerId})`);
         }
         
-        // Obter instância online
-        const instance = await getOnlineInstanceForClient(normalizedPhone);
+        // Obter próxima instância (round-robin)
+        const instance = getNextInstanceForClient(normalizedPhone);
         
         // Normalizar tipo de evento
         const normalizedEventType = normalizeEventType(EV, ST, PM);
@@ -416,6 +368,9 @@ app.post('/webhook/kirvano', async (req, res) => {
                 createdAt: new Date()
             });
             
+            // Registrar evento no histórico
+            const eventId = logEvent('aprovada', normalizedPhone, instance);
+            
             // Enviar para N8N
             const eventData = {
                 event_type: 'aprovada', // NORMALIZADO
@@ -434,7 +389,7 @@ app.post('/webhook/kirvano', async (req, res) => {
                 timestamp: new Date().toISOString()
             };
             
-            await sendToN8N(eventData);
+            await sendToN8N(eventData, eventId);
             res.json({ success: true, message: 'Venda aprovada processada' });
         }
         
@@ -466,6 +421,9 @@ app.post('/webhook/kirvano', async (req, res) => {
                 // Verificar se ainda está pendente
                 const state = conversationState.get(normalizedPhone);
                 if (state && state.order_code === orderCode) {
+                    // Registrar evento no histórico
+                    const eventId = logEvent('pix', normalizedPhone, instance);
+                    
                     // Enviar evento pix_timeout para N8N
                     const eventData = {
                         event_type: 'pix', // NORMALIZADO (timeout de PIX)
@@ -486,7 +444,7 @@ app.post('/webhook/kirvano', async (req, res) => {
                         timestamp: new Date().toISOString()
                     };
                     
-                    await sendToN8N(eventData);
+                    await sendToN8N(eventData, eventId);
                 }
                 
                 pixTimeouts.delete(normalizedPhone);
@@ -567,6 +525,9 @@ app.post('/webhook/evolution', async (req, res) => {
                 clientState.waiting_for_response = false;
                 conversationState.set(normalized, clientState);
                 
+                // Registrar evento no histórico
+                const eventId = logEvent('resposta', normalized, clientState.instance);
+                
                 // Enviar resposta_01 para N8N
                 const eventData = {
                     event_type: 'resposta', // NORMALIZADO
@@ -589,7 +550,7 @@ app.post('/webhook/evolution', async (req, res) => {
                     timestamp: new Date().toISOString()
                 };
                 
-                await sendToN8N(eventData);
+                await sendToN8N(eventData, eventId);
                 console.log(`✅ Resposta_01 enviada para N8N`);
             }
             else if (!clientState.waiting_for_response) {
@@ -608,103 +569,13 @@ app.post('/webhook/evolution', async (req, res) => {
     }
 });
 
-// ============ ENDPOINT DE DEBUG PARA INSTÂNCIAS ============
-app.get('/debug/instances', async (req, res) => {
-    const results = [];
-    
-    for (const instance of INSTANCES) {
-        try {
-            console.log(`🔍 Testando ${instance.name}...`);
-            
-            // Teste 1: connectionState
-            const url1 = `${EVOLUTION_BASE_URL}/instance/connectionState/${instance.name}`;
-            let test1 = null;
-            try {
-                const response1 = await axios.get(url1, { timeout: 5000 });
-                test1 = {
-                    status: response1.status,
-                    data: response1.data
-                };
-            } catch (error) {
-                test1 = { error: error.message };
-            }
-            
-            // Teste 2: Endpoint alternativo
-            const url2 = `${EVOLUTION_BASE_URL}/instance/fetchInstances`;
-            let test2 = null;
-            try {
-                const response2 = await axios.get(url2, { timeout: 5000 });
-                test2 = {
-                    status: response2.status,
-                    data: response2.data
-                };
-            } catch (error) {
-                test2 = { error: error.message };
-            }
-            
-            // Teste 3: Status direto
-            const url3 = `${EVOLUTION_BASE_URL}/instance/${instance.name}`;
-            let test3 = null;
-            try {
-                const response3 = await axios.get(url3, { timeout: 5000 });
-                test3 = {
-                    status: response3.status,
-                    data: response3.data
-                };
-            } catch (error) {
-                test3 = { error: error.message };
-            }
-            
-            results.push({
-                instance: instance.name,
-                evolution_base_url: EVOLUTION_BASE_URL,
-                tests: {
-                    connectionState: { url: url1, result: test1 },
-                    fetchInstances: { url: url2, result: test2 },
-                    instanceDirect: { url: url3, result: test3 }
-                }
-            });
-            
-        } catch (error) {
-            results.push({
-                instance: instance.name,
-                error: error.message
-            });
-        }
-    }
-    
-    res.json({
-        evolution_base_url: EVOLUTION_BASE_URL,
-        total_instances: INSTANCES.length,
-        results: results
-    });
-});
-
 // ============ ENDPOINTS DE STATUS ============
 app.get('/status', (req, res) => {
-    const pending = [];
-    for (const [phone, data] of pixTimeouts.entries()) {
-        pending.push({
-            phone: phone,
-            order_code: data.orderCode,
-            product: data.product,
-            created_at: data.createdAt
-        });
-    }
-    
-    const conversations = [];
-    for (const [phone, state] of conversationState.entries()) {
-        conversations.push({
-            phone: phone,
-            order_code: state.order_code,
-            product: state.product,
-            instance: state.instance,
-            response_count: state.response_count,
-            waiting_for_response: state.waiting_for_response,
-            original_event: state.original_event,
-            created_at: state.createdAt
-        });
-    }
+    // Filtrar eventos das últimas 24h
+    const last24h = Date.now() - DATA_RETENTION;
+    const recentEvents = eventHistory.filter(event => 
+        event.timestamp.getTime() > last24h
+    );
     
     res.json({
         status: 'online',
@@ -712,19 +583,14 @@ app.get('/status', (req, res) => {
         config: {
             n8n_webhook: N8N_WEBHOOK_URL,
             evolution_base_url: EVOLUTION_BASE_URL,
-            pix_timeout: '7 minutos',
-            data_retention: '24 horas',
             instances_count: INSTANCES.length
         },
-        metrics: {
-            pending_pix: pending.length,
-            active_conversations: conversations.length,
-            instance_mappings: clientInstanceMap.size,
-            idempotency_cache: idempotencyCache.size
-        },
-        pending_list: pending,
-        conversations_list: conversations,
-        recent_logs: systemLogs.slice(-20)
+        events: recentEvents,
+        stats: {
+            total_events: recentEvents.length,
+            sent_events: recentEvents.filter(e => e.status === 'sent').length,
+            error_events: recentEvents.filter(e => e.status === 'error').length
+        }
     });
 });
 
@@ -955,44 +821,115 @@ app.get('/', (req, res) => {
 <body>
     <div class="container">
         <div class="header">
-            <h1>🧠 Cérebro Kirvano v3.1</h1>
-            <div class="subtitle">Sistema Robusto de Gestão de Leads com 9 Instâncias</div>
+            <h1>🧠 Cérebro Kirvano - Eventos</h1>
+            <div class="subtitle">Histórico de Eventos das Últimas 24 Horas</div>
             
-            <div class="config-info">
-                <div class="config-item">
-                    <span class="config-label">N8N Webhook:</span>
-                    <span class="config-value">${N8N_WEBHOOK_URL}</span>
+            <div class="stats-grid" id="stats">
+                <div class="stat-card info">
+                    <div class="stat-label">📊 Total de Eventos</div>
+                    <div class="stat-value" id="totalEvents">0</div>
                 </div>
-                <div class="config-item">
-                    <span class="config-label">Evolution API:</span>
-                    <span class="config-value">${EVOLUTION_BASE_URL}</span>
+                
+                <div class="stat-card success">
+                    <div class="stat-label">✅ Enviados</div>
+                    <div class="stat-value" id="sentEvents">0</div>
                 </div>
-                <div class="config-item">
-                    <span class="config-label">Timeout PIX:</span>
-                    <span class="config-value">7 minutos</span>
+                
+                <div class="stat-card danger">
+                    <div class="stat-label">❌ Erros</div>
+                    <div class="stat-value" id="errorEvents">0</div>
                 </div>
-                <div class="config-item">
-                    <span class="config-label">Retenção de Dados:</span>
-                    <span class="config-value">24 horas</span>
-                </div>
-                <div class="config-item">
-                    <span class="config-label">Produtos:</span>
-                    <span class="config-value">CS | FAB</span>
-                </div>
-                <div class="config-item">
-                    <span class="config-label">Instâncias:</span>
-                    <span class="config-value">${INSTANCES.length} (GABY01-GABY09)</span>
-                </div>
-                <div class="config-item">
-                    <span class="config-label">Horário:</span>
-                    <span class="config-value">${new Date().toLocaleString('pt-BR')}</span>
+                
+                <div class="stat-card warning">
+                    <div class="stat-label">⏳ Pendentes</div>
+                    <div class="stat-value" id="pendingEvents">0</div>
                 </div>
             </div>
             
-            <div class="stats-grid" id="stats">
-                <div class="stat-card warning">
-                    <div class="stat-label">⏳ PIX Pendentes</div>
-                    <div class="stat-value" id="pendingPix">0</div>
+            <button class="btn" onclick="refreshData()">🔄 Atualizar</button>
+        </div>
+        
+        <div class="content-panel">
+            <h3>Eventos das Últimas 24h</h3>
+            <div id="eventsContainer">
+                <div class="empty-state">
+                    <p>Carregando eventos...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let statusData = null;
+        
+        async function refreshData() {
+            try {
+                const response = await fetch('/status');
+                statusData = await response.json();
+                
+                document.getElementById('totalEvents').textContent = statusData.stats.total_events;
+                document.getElementById('sentEvents').textContent = statusData.stats.sent_events;
+                document.getElementById('errorEvents').textContent = statusData.stats.error_events;
+                document.getElementById('pendingEvents').textContent = statusData.stats.total_events - statusData.stats.sent_events - statusData.stats.error_events;
+                
+                renderEvents();
+            } catch (error) {
+                console.error('Erro ao carregar dados:', error);
+            }
+        }
+        
+        function renderEvents() {
+            const container = document.getElementById('eventsContainer');
+            
+            if (!statusData || !statusData.events || statusData.events.length === 0) {
+                container.innerHTML = '<div class="empty-state"><p>Nenhum evento nas últimas 24 horas</p></div>';
+                return;
+            }
+
+            let html = '<table><thead><tr>';
+            html += '<th>Horário</th>';
+            html += '<th>Telefone</th>';
+            html += '<th>Tipo</th>';
+            html += '<th>Instância</th>';
+            html += '<th>Status</th>';
+            html += '<th>Enviado N8N</th>';
+            html += '</tr></thead><tbody>';
+
+            statusData.events.forEach(event => {
+                const timestamp = new Date(event.timestamp).toLocaleString('pt-BR');
+                const n8nTime = event.n8n_sent_at ? new Date(event.n8n_sent_at).toLocaleTimeString('pt-BR') : '-';
+                const phone = event.phone ? event.phone.replace(/(\d{2})(\d{2})(\d{5})(\d{4})/, '+$1 ($2) $3-$4') : '-';
+                
+                let statusClass = 'info';
+                let statusText = 'Pendente';
+                if (event.status === 'sent') {
+                    statusClass = 'success';
+                    statusText = 'Enviado';
+                } else if (event.status === 'error') {
+                    statusClass = 'danger';
+                    statusText = 'Erro';
+                }
+                
+                html += '<tr>';
+                html += '<td>' + timestamp + '</td>';
+                html += '<td>' + phone + '</td>';
+                html += '<td><span class="badge badge-info">' + event.event_type + '</span></td>';
+                html += '<td>' + event.instance + '</td>';
+                html += '<td><span class="badge badge-' + statusClass + '">' + statusText + '</span></td>';
+                html += '<td>' + n8nTime + '</td>';
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+        
+        // Auto-refresh a cada 10 segundos
+        refreshData();
+        setInterval(refreshData, 10000);
+    </script>
+</body>
+</html>`;0</div>
                 </div>
                 
                 <div class="stat-card info">
@@ -1171,17 +1108,14 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════╗
-║   🧠 CÉREBRO KIRVANO v3.1 ROBUSTO    ║
+║   🧠 CÉREBRO KIRVANO v3.2 SIMPLES    ║
 ╚══════════════════════════════════════╝
-✅ CORREÇÕES IMPLEMENTADAS:
+✅ CONFIGURAÇÕES:
+   • Instâncias: Round-robin simples
+   • Sem verificação de status
+   • Painel: Apenas eventos 24h
    • Normalização sem remover 9
-   • Gate correto de resposta
-   • Cancelamento por telefone
-   • Detecção robusta (UPPERCASE)
-   • Extração múltiplos formatos
-   • Idempotência dupla (Kirvano+Evolution)
-   • 9 instâncias com fallback + cache 15s
-   • Limpeza automática 24h
+   • Eventos: aprovada, pix, resposta
 
 📡 Webhooks:
    • Kirvano: /webhook/kirvano
@@ -1195,15 +1129,6 @@ app.listen(PORT, () => {
 🤖 Evolution: ${EVOLUTION_BASE_URL}
 ⏱️ Timeout PIX: 7 minutos
 🗑️ Limpeza: a cada 10 minutos
-💾 Cache instâncias: 15 segundos
 🚀 Porta: ${PORT}
 ════════════════════════════════════════`);
-    
-    // Warm-up: verificar todas as instâncias ao iniciar
-    console.log('\n🔥 Aquecendo instâncias...');
-    INSTANCES.forEach(i => {
-        checkInstanceStatus(i.name).catch(() => {
-            console.log(`⚠️ Falha no warm-up de ${i.name}`);
-        });
-    });
 });
