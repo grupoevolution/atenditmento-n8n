@@ -22,17 +22,17 @@ const PRODUCT_MAPPING = {
     '5288799c-d8e3-48ce-a91d-587814acdee5': 'FAB'
 };
 
-// Instâncias Evolution (9 instâncias)
+// Instâncias Evolution (9 instâncias) - CÓDIGOS ATUALIZADOS
 const INSTANCES = [
-    { name: 'GABY01', id: '1CEBB8703497-4F31-B33F-335A4233D2FE' },
-    { name: 'GABY02', id: '939E26DEA1FA-40D4-83CE-2BF0B3F795DC' },
-    { name: 'GABY03', id: 'F819629B5E33-435B-93BB-091B4C104C12' },
-    { name: 'GABY04', id: 'D555A7CBC0B3-425B-8E20-975232BE75F6' },
-    { name: 'GABY05', id: 'D97A63B8B05B-430E-98C1-61977A51EC0B' },
-    { name: 'GABY06', id: '6FC2C4C703BA-4A8A-9B3B-21536AE51323' },
-    { name: 'GABY07', id: '14F637AB35CD-448D-BF66-5673950FBA10' },
-    { name: 'GABY08', id: '82E0CE5B1A51-4B7B-BBEF-77D22320B482' },
-    { name: 'GABY09', id: 'B5783C928EF4-4DB0-ABBA-AF6913116E7B' }
+    { name: 'GABY01', id: 'E2C81A52501B-4ACC-B8CD-CC5CD8B3D772' },
+    { name: 'GABY02', id: '8ACC5623B341-4103-8DFC-D69A9D70B8C0' },
+    { name: 'GABY03', id: '8583DF575DE7-4040-833C-F4F4852AD220' },
+    { name: 'GABY04', id: '20A83A5A8582-40DE-8DA3-B3833EEE3A58' },
+    { name: 'GABY05', id: '1EF7D7CB2666-46E2-9869-4B3F8B86524F' },
+    { name: 'GABY06', id: '86AB0DB684CB-482A-ABCC-F0D6F98BC5CE' },
+    { name: 'GABY07', id: 'E6935AB086D4-478E-9A6F-13791D4654D5' },
+    { name: 'GABY08', id: '2C6E25A7854A-445E-9588-6DB7330EBC1D' },
+    { name: 'GABY09', id: '1D0EA3E93819-49BE-923C-6277A7D0C935' }
 ];
 
 // ============ ARMAZENAMENTO EM MEMÓRIA ============
@@ -72,18 +72,32 @@ function normalizePhone(phone) {
 function isApprovedEvent(EV, ST) {
     return EV.includes('APPROVED') || 
            EV.includes('PAID') || 
+           EV.includes('SALE_APPROVED') ||
+           EV.includes('PAYMENT_APPROVED') ||
            ST === 'APPROVED' || 
-           ST === 'PAID';
+           ST === 'PAID' ||
+           ST === 'COMPLETED';
 }
 
 // Verificar se é PIX pendente (recebe valores já em UPPERCASE)
 function isPendingPixEvent(EV, ST, PM) {
-    const hasPix = PM.includes('PIX') || EV.includes('PIX'); // aceita mesmo sem method
+    const hasPix = PM.includes('PIX') || EV.includes('PIX');
     const pending = ST.includes('PEND') || 
                    ST.includes('AWAIT') || 
                    ST.includes('CREATED') || 
+                   ST.includes('WAITING') ||
                    ST === 'PENDING';
-    return hasPix && (pending || EV.includes('PIX_GENERATED'));
+    return hasPix && (pending || EV.includes('PIX_GENERATED') || EV.includes('PIX_CREATED'));
+}
+
+// Normalizar evento para N8N (apenas "pix" ou "aprovada")
+function normalizeEventType(EV, ST, PM) {
+    if (isApprovedEvent(EV, ST)) {
+        return 'aprovada';
+    } else if (isPendingPixEvent(EV, ST, PM)) {
+        return 'pix';
+    }
+    return 'unknown';
 }
 
 // Extrair texto de mensagem Evolution (múltiplos formatos)
@@ -148,29 +162,55 @@ async function checkInstanceStatus(instanceName) {
         return cached.online;
     }
     
+    const url = `${EVOLUTION_BASE_URL}/instance/connectionState/${instanceName}`;
+    console.log(`🔍 Verificando ${instanceName} em: ${url}`);
+    
     try {
-        const response = await axios.get(
-            `${EVOLUTION_BASE_URL}/instance/connectionState/${instanceName}`,
-            { timeout: 3000 }
-        );
-        const isConnected = response.data?.state === 'open' || 
-                          response.data?.instance?.state === 'open';
+        const response = await axios.get(url, { 
+            timeout: 5000,
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        console.log(`📊 Resposta para ${instanceName}:`, {
+            status: response.status,
+            data: response.data
+        });
+        
+        // Tentar diferentes formas de verificar se está conectado
+        const data = response.data;
+        let isConnected = false;
+        
+        if (data.state === 'open') isConnected = true;
+        if (data.instance?.state === 'open') isConnected = true;
+        if (data.status === 'open') isConnected = true;
+        if (data.connectionState === 'open') isConnected = true;
+        if (data.connected === true) isConnected = true;
         
         // Atualizar cache
         instanceStatus.set(instanceName, {
             online: isConnected,
-            checkedAt: Date.now()
+            checkedAt: Date.now(),
+            lastResponse: data
         });
         
         console.log(`📡 Instância ${instanceName}: ${isConnected ? 'ONLINE' : 'OFFLINE'} (verificado)`);
         return isConnected;
+        
     } catch (error) {
-        console.log(`⚠️ Erro ao verificar ${instanceName}: ${error.message}`);
+        console.log(`❌ Erro ao verificar ${instanceName}:`, {
+            message: error.message,
+            code: error.code,
+            status: error.response?.status,
+            data: error.response?.data
+        });
         
         // Salvar no cache como offline
         instanceStatus.set(instanceName, {
             online: false,
-            checkedAt: Date.now()
+            checkedAt: Date.now(),
+            error: error.message
         });
         
         return false;
@@ -350,6 +390,9 @@ app.post('/webhook/kirvano', async (req, res) => {
         // Obter instância online
         const instance = await getOnlineInstanceForClient(normalizedPhone);
         
+        // Normalizar tipo de evento
+        const normalizedEventType = normalizeEventType(EV, ST, PM);
+        
         // ========== VENDA APROVADA ==========
         if (isApprovedEvent(EV, ST)) {
             console.log(`✅ VENDA APROVADA - ${orderCode} - ${customerName}`);
@@ -365,7 +408,7 @@ app.post('/webhook/kirvano', async (req, res) => {
                 order_code: orderCode,
                 product: productType,
                 instance: instance,
-                original_event: 'aprovada',
+                original_event: 'aprovada', // NORMALIZADO
                 response_count: 0,
                 waiting_for_response: false, // COMEÇA FALSE
                 client_name: customerName,
@@ -375,10 +418,10 @@ app.post('/webhook/kirvano', async (req, res) => {
             
             // Enviar para N8N
             const eventData = {
-                event_type: 'venda_aprovada',
+                event_type: 'aprovada', // NORMALIZADO
                 produto: productType,
                 instancia: instance,
-                evento_origem: 'aprovada',
+                evento_origem: 'aprovada', // NORMALIZADO
                 cliente: {
                     nome: customerName.split(' ')[0],
                     telefone: normalizedPhone,
@@ -407,7 +450,7 @@ app.post('/webhook/kirvano', async (req, res) => {
                 order_code: orderCode,
                 product: productType,
                 instance: instance,
-                original_event: 'pix',
+                original_event: 'pix', // NORMALIZADO
                 response_count: 0,
                 waiting_for_response: false, // COMEÇA FALSE
                 client_name: customerName,
@@ -425,10 +468,10 @@ app.post('/webhook/kirvano', async (req, res) => {
                 if (state && state.order_code === orderCode) {
                     // Enviar evento pix_timeout para N8N
                     const eventData = {
-                        event_type: 'pix_timeout',
+                        event_type: 'pix', // NORMALIZADO (timeout de PIX)
                         produto: productType,
                         instancia: instance,
-                        evento_origem: 'pix',
+                        evento_origem: 'pix', // NORMALIZADO
                         cliente: {
                             nome: customerName.split(' ')[0],
                             telefone: normalizedPhone,
@@ -439,6 +482,7 @@ app.post('/webhook/kirvano', async (req, res) => {
                             valor: totalPrice,
                             pix_url: state.pix_url || ''
                         },
+                        timeout: true, // Flag para identificar que é timeout
                         timestamp: new Date().toISOString()
                     };
                     
@@ -525,10 +569,10 @@ app.post('/webhook/evolution', async (req, res) => {
                 
                 // Enviar resposta_01 para N8N
                 const eventData = {
-                    event_type: 'resposta_01',
+                    event_type: 'resposta', // NORMALIZADO
                     produto: clientState.product,
                     instancia: clientState.instance,
-                    evento_origem: clientState.original_event,
+                    evento_origem: clientState.original_event, // já normalizado (pix ou aprovada)
                     cliente: {
                         telefone: normalized,
                         nome: clientState.client_name.split(' ')[0]
@@ -562,6 +606,78 @@ app.post('/webhook/evolution', async (req, res) => {
         console.error('❌ ERRO Evolution:', error);
         res.status(500).json({ success: false, error: error.message });
     }
+});
+
+// ============ ENDPOINT DE DEBUG PARA INSTÂNCIAS ============
+app.get('/debug/instances', async (req, res) => {
+    const results = [];
+    
+    for (const instance of INSTANCES) {
+        try {
+            console.log(`🔍 Testando ${instance.name}...`);
+            
+            // Teste 1: connectionState
+            const url1 = `${EVOLUTION_BASE_URL}/instance/connectionState/${instance.name}`;
+            let test1 = null;
+            try {
+                const response1 = await axios.get(url1, { timeout: 5000 });
+                test1 = {
+                    status: response1.status,
+                    data: response1.data
+                };
+            } catch (error) {
+                test1 = { error: error.message };
+            }
+            
+            // Teste 2: Endpoint alternativo
+            const url2 = `${EVOLUTION_BASE_URL}/instance/fetchInstances`;
+            let test2 = null;
+            try {
+                const response2 = await axios.get(url2, { timeout: 5000 });
+                test2 = {
+                    status: response2.status,
+                    data: response2.data
+                };
+            } catch (error) {
+                test2 = { error: error.message };
+            }
+            
+            // Teste 3: Status direto
+            const url3 = `${EVOLUTION_BASE_URL}/instance/${instance.name}`;
+            let test3 = null;
+            try {
+                const response3 = await axios.get(url3, { timeout: 5000 });
+                test3 = {
+                    status: response3.status,
+                    data: response3.data
+                };
+            } catch (error) {
+                test3 = { error: error.message };
+            }
+            
+            results.push({
+                instance: instance.name,
+                evolution_base_url: EVOLUTION_BASE_URL,
+                tests: {
+                    connectionState: { url: url1, result: test1 },
+                    fetchInstances: { url: url2, result: test2 },
+                    instanceDirect: { url: url3, result: test3 }
+                }
+            });
+            
+        } catch (error) {
+            results.push({
+                instance: instance.name,
+                error: error.message
+            });
+        }
+    }
+    
+    res.json({
+        evolution_base_url: EVOLUTION_BASE_URL,
+        total_instances: INSTANCES.length,
+        results: results
+    });
 });
 
 // ============ ENDPOINTS DE STATUS ============
